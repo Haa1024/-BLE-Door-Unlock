@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@drawable/widget_background"
+    android:padding="6dp">
+
+    <!-- 圆形按钮区域 (40dp 适配最小尺寸) -->
+    <FrameLayout
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginBottom="3dp">
+
+        <!-- 圆形底色 -->
+        <ImageView
+            android:id="@+id/widget_circle_bg"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:src="@drawable/widget_circle_idle"
+            android:scaleType="fitXY" />
+
+        <!-- 锁定图标 -->
+        <TextView
+            android:id="@+id/widget_icon"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:text="🔒"
+            android:textSize="18sp" />
+
+        <!-- 加载旋转圈 -->
+        <ProgressBar
+            android:id="@+id/widget_progress"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="center"
+            android:indeterminate="true"
+            android:indeterminateTint="#FFFFFF"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+    <!-- 状态文字 -->
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="开门"
+        android:textColor="#1A1814"
+        android:textSize="10sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="marquee"
+        android:singleLine="true" />
+
+    <!-- 设备名 (仅宽版显示) -->
+    <TextView
+        android:id="@+id/widget_device"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="XN-0000000"
+        android:textColor="#8B8578"
+        android:textSize="10sp"
+        android:gravity="center"
+        android:visibility="gone" />
+
+</LinearLayout>

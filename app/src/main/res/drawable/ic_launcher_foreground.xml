@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 钥匙头部 (圆形), 圆心 (54,42), 半径 14 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,42 A14,14 0 1,1 68,42 A14,14 0 1,1 40,42 Z" />
+
+    <!-- 钥匙杆 (矩形) y=56→78 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M51,56 L57,56 L57,78 L51,78 Z" />
+
+    <!-- 上齿 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,60 L65,60 L65,64 L57,64 Z" />
+
+    <!-- 下齿 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,68 L63,68 L63,72 L57,72 Z" />
+
+</vector>
