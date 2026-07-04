@@ -9,7 +9,7 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("../../debug.keystore")
+            storeFile = file("../release.keystore")
             storePassword = "android"
             keyAlias = "debug"
             keyPassword = "android"
