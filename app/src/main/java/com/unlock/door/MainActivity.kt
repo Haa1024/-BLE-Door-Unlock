@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -42,6 +43,8 @@ import androidx.lifecycle.lifecycleScope
 import com.unlock.door.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,9 +62,11 @@ class MainActivity : ComponentActivity() {
 
     private val requestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { perms ->
-            val allGranted = perms.values.all { it }
-            if (!allGranted) {
+            if (bleManager?.hasPermissions() != true) {
                 Toast.makeText(this, "需要蓝牙权限才能开门", Toast.LENGTH_LONG).show()
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                perms[Manifest.permission.POST_NOTIFICATIONS] == false) {
+                Toast.makeText(this, "通知未开启，小组件开门的详细进度和失败原因可能无法显示", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -71,8 +76,10 @@ class MainActivity : ComponentActivity() {
         SettingsManager.init(this)
 
         bleManager = BleUnlockManager(this) { msg ->
-            logMessages.add(msg)
-            if (logMessages.size > 100) logMessages.removeAt(0)
+            lifecycleScope.launch(Dispatchers.Main) {
+                logMessages.add(msg)
+                if (logMessages.size > 100) logMessages.removeAt(0)
+            }
         }
 
         setContent {
@@ -112,6 +119,12 @@ class MainActivity : ComponentActivity() {
                         val showLogs = SettingsManager.showLogs
                         UnlockScreen(
                             onUnlock = { doUnlock() },
+                            onCancel = {
+                                lifecycleScope.launch {
+                                    unlockJob?.cancelAndJoin()
+                                    bleManager?.cancel()
+                                }
+                            },
                             onOpenSettings = { showSettings = true },
                             state = bleManager?.state?.collectAsState()?.value
                                 ?: BleUnlockManager.State.IDLE,
@@ -128,6 +141,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = android.app.NotificationChannel(
             "door_unlock", "共享开门", android.app.NotificationManager.IMPORTANCE_DEFAULT
         )
@@ -137,6 +151,9 @@ class MainActivity : ComponentActivity() {
 
     private fun checkPermissions() {
         val perms = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             perms.add(Manifest.permission.BLUETOOTH_SCAN)
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
@@ -152,6 +169,8 @@ class MainActivity : ComponentActivity() {
 
     private fun doUnlock() {
         val manager = bleManager ?: return
+        if (unlockJob?.isActive == true && manager.state.value !in
+            setOf(BleUnlockManager.State.SUCCESS, BleUnlockManager.State.FAILED)) return
         if (!manager.hasPermissions()) { checkPermissions(); return }
         if (!manager.isBluetoothEnabled()) {
             requestBluetoothEnable.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
@@ -162,10 +181,13 @@ class MainActivity : ComponentActivity() {
         unlockJob?.cancel()
         unlockJob = lifecycleScope.launch(Dispatchers.Main) {
             try { withContext(Dispatchers.IO) { manager.unlock() } }
+            catch (e: CancellationException) { throw e }
             catch (_: Exception) {}
-            // 成功后 3 秒自动恢复初始状态
-            delay(3000)
-            manager.cancel()
+            // 失败原因保留到下一次点击；成功结果展示后恢复。
+            if (manager.state.value == BleUnlockManager.State.SUCCESS) {
+                delay(3000)
+                manager.cancel()
+            }
         }
     }
 }
@@ -175,6 +197,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun UnlockScreen(
     onUnlock: () -> Unit,
+    onCancel: () -> Unit,
     onOpenSettings: () -> Unit,
     state: BleUnlockManager.State,
     statusText: String,
@@ -186,6 +209,21 @@ fun UnlockScreen(
 
     val isSuccess = state == BleUnlockManager.State.SUCCESS
     val isFailed  = state == BleUnlockManager.State.FAILED
+
+    var showFailureDialog by remember(state, statusText) { mutableStateOf(isFailed) }
+    if (showFailureDialog) {
+        AlertDialog(
+            onDismissRequest = { showFailureDialog = false },
+            title = { Text("未能完成开门") },
+            text = { Text(statusText) },
+            confirmButton = {
+                TextButton(onClick = { showFailureDialog = false; onUnlock() }) { Text("重新尝试") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFailureDialog = false }) { Text("知道了") }
+            },
+        )
+    }
 
     var pressScale by remember { mutableStateOf(1f) }
     val buttonScale by animateFloatAsState(
@@ -235,6 +273,21 @@ fun UnlockScreen(
 
             // ── 状态文字 ──
             StatusText(state = state, text = statusText)
+            if (isProcessing) {
+                Spacer(Modifier.height(24.dp))
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier.width(200.dp).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
+                ) {
+                    Text("取消本次开门", fontWeight = FontWeight.SemiBold)
+                }
+            }
 
             Spacer(Modifier.weight(0.4f))
 

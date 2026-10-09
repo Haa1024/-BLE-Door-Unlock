@@ -1,5 +1,9 @@
 package com.unlock.door
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.*
@@ -19,7 +23,23 @@ object ServerApi {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(12, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+
+    // 可取消的网络请求：用户离开页面或总恢复超时后，立即取消请求。
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { cont ->
+        val call = client.newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                cont.resume(response) { response.close() }
+            }
+        })
+    }
 
     private val FORM_TYPE = "application/x-www-form-urlencoded".toMediaType()
 
@@ -47,7 +67,6 @@ object ServerApi {
                 "${it.key}=$v"
             }
         val raw = "$query&key=$key"
-        android.util.Log.d("ServerApi", "签名原文: $raw")
         val md5 = java.security.MessageDigest.getInstance("MD5")
             .digest(raw.toByteArray())
         return md5.joinToString("") { "%02X".format(it) }
@@ -118,12 +137,10 @@ object ServerApi {
     suspend fun sendSmsCode(phone: String): CodeResult = withContext(Dispatchers.IO) {
         try {
             val url = "${apiServer()}/webapi/users/get_login_code?phone=$phone"
-            android.util.Log.d("ServerApi", "发送验证码: $url")
 
             val request = Request.Builder().url(url).get().build()
             val response = client.newCall(request).execute()
             val bodyStr = response.body?.string() ?: ""
-            android.util.Log.d("ServerApi", "验证码响应 code=${response.code} body=${bodyStr.take(200)}")
 
             if (response.isSuccessful) {
                 CodeResult(true)
@@ -143,6 +160,7 @@ object ServerApi {
         val token: String = "",
         val projectName: String = "",
         val error: String = "",
+        val requiresVerification: Boolean = false,
     )
 
     suspend fun login(phone: String, password: String): LoginResult = withContext(Dispatchers.IO) {
@@ -152,101 +170,102 @@ object ServerApi {
                 "phone" to phone,
                 "pwd" to password,
             )
-            val query = signed.entries.joinToString("&") { "${it.key}=${it.value}" }
+            val query = signed.entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }
 
-            // 试所有服务器
-            val servers = listOf(
-                "https://pm.whxinna.com",
-                "https://m5-zhuli.whxinna.com",
-                "https://p4-zhuli.whxinna.com",
-                "https://f5-zhuli.whxinna.com",
+            LoginServerFallback.login(
+                preferredServer = SettingsManager.serverBaseUrl,
+                attempt = { server -> loginAtServer(server, query) },
+                rememberServer = { server -> SettingsManager.serverBaseUrl = server },
             )
-            val results = mutableListOf<String>()
-            for (srv in servers) {
-                val url = "$srv/webapi/users/login?$query"
-                val request = Request.Builder().url(url).get().build()
-                val response = client.newCall(request).execute()
-                val bodyStr = response.body?.string() ?: ""
-                results.add("$srv → ${response.code} ${bodyStr.take(120)}")
-                if (response.code == 404 || bodyStr.isBlank()) continue
-                val json = try { JSONObject(bodyStr) } catch (_: Exception) { continue }
-                if (!json.optBoolean("result", false)) continue
-
-                // 1. 先查顶层 platform_token
-                var token = json.optString("platform_token", "")
-                if (token.isBlank()) token = json.optJSONObject("data")?.optString("platform_token", "") ?: ""
-
-                // 打印顶层 JSON 字段 (调试)
-                android.util.Log.d("ServerApi", "login 顶层字段: ${json.keys().asSequence().toList()}")
-                android.util.Log.d("ServerApi", "login 完整响应: ${bodyStr.take(800)}")
-
-                // 2. 解析 data (可能是 base64 字符串, 也可能是 JSON 对象)
-                var dataJson: JSONObject? = json.optJSONObject("data")
-                if (dataJson == null) {
-                    val dataB64 = json.optString("data", "")
-                    if (dataB64.isNotBlank()) {
-                        val decoded = decodeBase64Data(dataB64)
-                        dataJson = try { JSONObject(decoded) } catch (_: Exception) { null }
-                    }
-                }
-                if (dataJson != null) {
-                    if (token.isBlank()) token = dataJson.optString("platform_token", "")
-                    // 保存用户 ID 和 identity_code (项目服务器会话令牌)
-                    val userInfo = dataJson.optJSONObject("user_info")
-                    android.util.Log.d("ServerApi", "userInfo keys: ${userInfo?.keys()?.asSequence()?.toList()}")
-                    val uid = userInfo?.optString("id", "") ?: ""
-                    val idCode = userInfo?.optString("identity_code", "") ?: ""
-                    android.util.Log.d("ServerApi", "uid='$uid' idCode='${idCode.take(30)}...'")
-                    if (uid.isNotBlank()) {
-                        SettingsManager.userId = uid
-                        android.util.Log.d("ServerApi", "已保存 userId=$uid")
-                    } else {
-                        android.util.Log.d("ServerApi", "userId 为空!")
-                    }
-                    if (idCode.isNotBlank()) {
-                        SettingsManager.identityCode = idCode
-                    } else {
-                        // 兜底: 直接在顶层的 id / user_id / staff_id
-                        val fallbackUid = dataJson.optString("id", "").ifBlank {
-                            dataJson.optString("user_id", "").ifBlank {
-                                dataJson.optString("staff_id", "")
-                            }
-                        }
-                        if (fallbackUid.isNotBlank()) SettingsManager.userId = fallbackUid
-                    }
-                    val info = dataJson.optJSONObject("server_info")
-                    if (info != null) {
-                        parseServerInfo(info)
-                    }
-                }
-
-                // 3. 顶层 server_info
-                val topInfo = json.optJSONObject("server_info")
-                if (topInfo != null) parseServerInfo(topInfo)
-                val topSrv = json.optString("server_addr", "")
-                if (topSrv.isNotBlank()) SettingsManager.projectServerUrl = topSrv
-
-                // 4. 尝试从顶层 user_info 提取 user_id (如果 data 用 JSON 对象非 base64)
-                if (SettingsManager.userId.isBlank()) {
-                    val topUserInfo = json.optJSONObject("user_info")
-                    val topUid = topUserInfo?.optString("id", "") ?: json.optString("id", "").ifBlank {
-                        json.optString("user_id", "").ifBlank {
-                            json.optString("staff_id", "")
-                        }
-                    }
-                    if (topUid.isNotBlank()) SettingsManager.userId = topUid
-                }
-
-                if (token.isNotBlank()) {
-                    SettingsManager.platformToken = token
-                    // 把完整响应保存供调试
-                    val saved = "token前20=${token.take(20)}... | 服务器=${SettingsManager.projectServerUrl.ifBlank{"无"}} | 完整=${bodyStr.take(500)}"
-                    return@withContext LoginResult(true, token, saved)
-                }
-            }
-            return@withContext LoginResult(false, error = results.joinToString("\n"))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             LoginResult(false, error = "${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private suspend fun loginAtServer(server: String, query: String): LoginResult {
+        val request = Request.Builder().url("$server/webapi/users/login?$query").get().build()
+        execute(request).use { response ->
+            val bodyStr = response.body?.string() ?: ""
+            if (response.code == 404 || bodyStr.isBlank()) {
+                return LoginResult(false, error = "HTTP ${response.code}，服务器未提供登录结果")
+            }
+            val json = try { JSONObject(bodyStr) } catch (_: Exception) {
+                return LoginResult(false, error = "服务器响应解析失败（HTTP ${response.code}）")
+            }
+            if (!json.optBoolean("result", false)) {
+                val message = json.optString("msg", "").ifBlank {
+                    json.optString("message", "").ifBlank { json.optString("err_msg", "") }
+                }
+                if (message.contains("需要进行验证") || message.contains("需要验证") ||
+                    message.contains("验证码") || message.contains("verification", ignoreCase = true)) {
+                    return LoginResult(false, error = "服务器要求额外验证，请先在官方 App 完成验证", requiresVerification = true)
+                }
+                return LoginResult(false, error = "HTTP ${response.code}: ${message.ifBlank { "登录失败" }}")
+            }
+
+            // 1. 先查顶层 platform_token
+            var token = json.optString("platform_token", "")
+            if (token.isBlank()) token = json.optJSONObject("data")?.optString("platform_token", "") ?: ""
+
+            // 2. 解析 data (可能是 base64 字符串, 也可能是 JSON 对象)
+            var dataJson: JSONObject? = json.optJSONObject("data")
+            if (dataJson == null) {
+                val dataB64 = json.optString("data", "")
+                if (dataB64.isNotBlank()) {
+                    val decoded = decodeBase64Data(dataB64)
+                    dataJson = try { JSONObject(decoded) } catch (_: Exception) { null }
+                }
+            }
+            if (token.isBlank()) token = dataJson?.optString("platform_token", "") ?: ""
+            if (token.isBlank()) {
+                return LoginResult(false, error = "服务器未返回登录令牌（HTTP ${response.code}）")
+            }
+            if (dataJson != null) {
+                // 保存用户 ID 和 identity_code (项目服务器会话令牌)
+                val userInfo = dataJson.optJSONObject("user_info")
+                val uid = userInfo?.optString("id", "") ?: ""
+                val idCode = userInfo?.optString("identity_code", "") ?: ""
+                if (uid.isNotBlank()) {
+                    SettingsManager.userId = uid
+                }
+                if (idCode.isNotBlank()) {
+                    SettingsManager.identityCode = idCode
+                } else {
+                    // 兜底: 直接在顶层的 id / user_id / staff_id
+                    val fallbackUid = dataJson.optString("id", "").ifBlank {
+                        dataJson.optString("user_id", "").ifBlank {
+                            dataJson.optString("staff_id", "")
+                        }
+                    }
+                    if (fallbackUid.isNotBlank()) SettingsManager.userId = fallbackUid
+                }
+                val info = dataJson.optJSONObject("server_info")
+                if (info != null) {
+                    parseServerInfo(info)
+                }
+            }
+
+            // 3. 顶层 server_info
+            val topInfo = json.optJSONObject("server_info")
+            if (topInfo != null) parseServerInfo(topInfo)
+            val topSrv = json.optString("server_addr", "")
+            if (topSrv.isNotBlank()) SettingsManager.projectServerUrl = topSrv
+
+            // 4. 尝试从顶层 user_info 提取 user_id (如果 data 用 JSON 对象非 base64)
+            if (SettingsManager.userId.isBlank()) {
+                val topUserInfo = json.optJSONObject("user_info")
+                val topUid = topUserInfo?.optString("id", "") ?: json.optString("id", "").ifBlank {
+                    json.optString("user_id", "").ifBlank {
+                        json.optString("staff_id", "")
+                    }
+                }
+                if (topUid.isNotBlank()) SettingsManager.userId = topUid
+            }
+
+            SettingsManager.platformToken = token
+            return LoginResult(true, token, SettingsManager.projectServerUrl)
         }
     }
 
@@ -453,17 +472,10 @@ object ServerApi {
         val chainKey: String = "",
     )
 
-    suspend fun fetchAddress(): AddressInfo = withContext(Dispatchers.IO) {
+    suspend fun fetchAddress(targetDeviceId: Int? = null): AddressInfo = withContext(Dispatchers.IO) {
         try {
             val token = SettingsManager.platformToken
-            if (token.isBlank()) throw Exception("未登录")
-
-            // 调试: 打印所有 SettingsManager 值
-            android.util.Log.d("ServerApi", "Settings: userId=${SettingsManager.userId}, " +
-                "serverAppId=${SettingsManager.serverAppId}, serverId=${SettingsManager.serverId}, " +
-                "identityCode=${SettingsManager.identityCode.take(20)}..., " +
-                "projectServerUrl=${SettingsManager.projectServerUrl}, " +
-                "projectSignKey=${SettingsManager.projectSignKey.take(10)}...")
+            if (token.isBlank()) throw SessionExpiredException("未登录，需要重新登录")
 
             // ★ 原 App 的 getAddress() 实际调用的是 keyList 端点 (bN = Ca = () => gt.get(ht.keyList)):
             //   ht.keyList = "/webapi/v1/staff/credentials"  → 返回门锁地址数组 (含 device_id / credential)
@@ -480,26 +492,37 @@ object ServerApi {
 
             // gt 客户端不送 Authorization header
             val request = Request.Builder().url(url).get().build()
-            val response = client.newCall(request).execute()
+            val response = execute(request)
             val bodyStr = response.body?.string() ?: ""
-            android.util.Log.d("ServerApi", "fetchAddress 响应: $bodyStr")
-
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${bodyStr.take(200)}")
-
+            if (response.code == 401) throw SessionExpiredException()
             val json = try { JSONObject(bodyStr) } catch (_: Exception) {
-                throw Exception("JSON 解析失败: ${bodyStr.take(200)}")
+                throw Exception("服务器响应解析失败（HTTP ${response.code}）")
             }
+            val error = json.optString("msg", "").ifBlank { json.optString("err_msg", "") }
+            if (error.contains("login_timeout", ignoreCase = true)) throw SessionExpiredException()
+            if (error.contains("需要进行验证") || error.contains("需要验证")) throw VerificationRequiredException()
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: $error")
             if (!json.optBoolean("result", false)) {
                 val msg = json.optString("msg", "").ifBlank {
                     json.optString("err_msg", "")
                 }
-                throw Exception(msg.ifBlank { bodyStr.take(200) })
+                throw Exception(msg.ifBlank { "服务器未返回错误原因" })
             }
 
             // ★ 原 App getAddress() 返回的 data 是「门锁地址」数组:
             //   r.data[0].building_name / device_id / ble_name / ble_mac / credential / credential_id ...
             //   字段是扁平结构, 直接平铺在数组元素上 (见 localStorage 的 doorLockAddress)
-            var item: JSONObject? = json.optJSONArray("data")?.optJSONObject(0)
+            fun selectDevice(items: JSONArray): JSONObject? {
+                // 设置页首次获取仍用第一项；开门恢复时优先匹配当前门锁。
+                if (targetDeviceId == null) return items.optJSONObject(0)
+                for (i in 0 until items.length()) {
+                    val candidate = items.optJSONObject(i) ?: continue
+                    val lock = candidate.optJSONObject("door_lock") ?: candidate
+                    if (lock.optInt("device_id") == targetDeviceId) return candidate
+                }
+                return null
+            }
+            var item: JSONObject? = json.optJSONArray("data")?.let { selectDevice(it) }
 
             // 兼容: data 是单个 JSONObject
             if (item == null) {
@@ -507,17 +530,17 @@ object ServerApi {
             }
             // 兼容: data 是 base64 字符串
             if (item == null) {
-                val dataB64 = json.optString("data", "")
+                val dataB64 = json.opt("data") as? String ?: ""
                 if (dataB64.isNotBlank()) {
                     val decoded = decodeBase64Data(dataB64)
                     item = try { JSONObject(decoded) } catch (_: Exception) {
-                        try { JSONArray(decoded).optJSONObject(0) } catch (_: Exception) { null }
+                        try { selectDevice(JSONArray(decoded)) } catch (_: Exception) { null }
                     }
                 }
             }
             if (item == null) {
                 // data 为空数组/无门锁地址 → 返回全 0, 上层显示「未找到门锁设备」
-                android.util.Log.d("ServerApi", "fetchAddress: data 为空, 完整响应: $bodyStr")
+                android.util.Log.d("ServerApi", "fetchAddress: 未找到当前门锁")
                 return@withContext AddressInfo(buildingName = "", floorName = "", roomName = "")
             }
 
@@ -535,7 +558,6 @@ object ServerApi {
             val battery = doorLock.optInt("battery_level", 0)
             val credId = doorLock.optInt("credential_id", 0)
             val chainKey = doorLock.optString("credential", "")
-            android.util.Log.d("ServerApi", "fetchAddress 解析: deviceId=$devId ble_name=$devName mac=$mac credential_id=$credId credential=${chainKey.take(8)}...")
 
             return@withContext AddressInfo(
                 buildingName = building,
@@ -548,8 +570,14 @@ object ServerApi {
                 credentialId = credId,
                 chainKey = chainKey,
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: SessionExpiredException) {
+            throw e
+        } catch (e: VerificationRequiredException) {
+            throw e
         } catch (e: Exception) {
-            throw Exception("地址信息请求失败: ${e.message}")
+            throw Exception("地址信息请求失败: ${e.message}", e)
         }
     }
 

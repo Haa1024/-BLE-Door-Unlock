@@ -27,6 +27,8 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
         const val STATE_UNLOCKING = 1
         const val STATE_SUCCESS = 2
         const val STATE_FAILED = 3
+        private var currentState = STATE_IDLE
+        private var currentMessage: String? = null
 
         /** 进程被杀后重建时，SettingsManager 可能未初始化 */
         private fun ensureSettingsInit(context: Context) {
@@ -35,19 +37,21 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        fun updateWidget(context: Context, state: Int = STATE_IDLE) {
+        fun updateWidget(context: Context, state: Int = STATE_IDLE, message: String? = null) {
+            currentState = state
+            currentMessage = message
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(
                 android.content.ComponentName(context, DoorLockWidgetProvider::class.java)
             )
             for (id in ids) {
                 val options = manager.getAppWidgetOptions(id)
-                val views = buildViews(context, options, state)
+                val views = buildViews(context, options, state, message)
                 manager.updateAppWidget(id, views)
             }
         }
 
-        private fun buildViews(context: Context, options: Bundle, state: Int): RemoteViews {
+        private fun buildViews(context: Context, options: Bundle, state: Int, message: String? = null): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_door_lock)
 
             // 获取小组件实际尺寸
@@ -86,7 +90,7 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
                 if (showProgress) View.VISIBLE else View.GONE)
 
             // ─── 文字区域 ───
-            val statusText = when (state) {
+            val statusText = message ?: when (state) {
                 STATE_UNLOCKING -> "开门中..."
                 STATE_SUCCESS   -> "已开门 ✓"
                 STATE_FAILED    -> "失败, 重试"
@@ -162,7 +166,7 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
         ensureSettingsInit(context)
         for (id in ids) {
             val options = manager.getAppWidgetOptions(id)
-            manager.updateAppWidget(id, buildViews(context, options, STATE_IDLE))
+            manager.updateAppWidget(id, buildViews(context, options, currentState, currentMessage))
         }
     }
 
@@ -171,14 +175,13 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
     ) {
         super.onAppWidgetOptionsChanged(context, manager, id, options)
         ensureSettingsInit(context)
-        manager.updateAppWidget(id, buildViews(context, options, STATE_IDLE))
+        manager.updateAppWidget(id, buildViews(context, options, currentState, currentMessage))
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         ensureSettingsInit(context)
         when (intent.action) {
             ACTION_UNLOCK -> {
-                updateWidget(context, STATE_UNLOCKING)
                 val serviceIntent = Intent(context, UnlockService::class.java)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     context.startForegroundService(serviceIntent)
@@ -188,7 +191,7 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
             }
             ACTION_UPDATE_UI -> {
                 val state = intent.getIntExtra("state", STATE_IDLE)
-                updateWidget(context, state)
+                updateWidget(context, state, intent.getStringExtra("message"))
             }
             else -> super.onReceive(context, intent)
         }
