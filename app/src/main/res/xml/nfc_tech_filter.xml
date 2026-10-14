@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「碰门锁本体当磁标签」所用的 NFC 技术过滤。
+
+  实测结论（2026-10-14，桃园七舍 332）：
+    门锁感应区是 ISO14443-A Type 2 标签，ATQA=4400 / SAK=0，techList 仅 NfcA。
+    SAK 的 bit6 未置位 → 不支持 ISO/IEC 14443-4 → 不可能有 IsoDep；
+    也不是 Mifare Classic。
+
+  注意：android 的分发层只能过滤到「技术类型」，无法按 UID 过滤，
+  而 NfcA 是所有 Type A 卡（校园卡/公交卡/银行卡…）的基础技术。
+  所以这里只能粗筛，真正的判定放在 NfcTagDispatchActivity 里用 UID 做。
+-->
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <tech-list>
+        <tech>android.nfc.tech.NfcA</tech>
+    </tech-list>
+</resources>

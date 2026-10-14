@@ -6,4 +6,35 @@
         <item name="android:windowBackground">#F9F6F0</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
+
+    <!-- 碰门锁标签分发用的无界面主题（透明且无动画，避免后台唤起时闪屏） -->
+    <style name="Theme.SimpleUnlock.Transparent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
+    <!--
+      碰锁开门的浮层主题：全屏透明（windowIsFloating=false 才能把卡片贴到底部）、
+      关掉系统转场（windowAnimationStyle=@null），入场动画完全交给卡片自己。
+    -->
+    <style name="Theme.SimpleUnlock.Overlay" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <!--
+          Theme.Translucent 家族默认不绘制系统栏背景，这会让下面那句 transparent 被
+          忽略、系统退回默认的黑色 → 浮层一冒出来通知栏就变黑。
+          显式打开系统栏背景绘制后，透明才真正生效，状态栏会透出底下的内容，
+          和「没有浮层时」看起来一致。
+        -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
 </resources>

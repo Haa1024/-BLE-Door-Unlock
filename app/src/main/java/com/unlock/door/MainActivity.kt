@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         SettingsManager.init(this)
+        syncNfcTagDispatchComponent()
 
         bleManager = BleUnlockManager(this) { msg ->
             logMessages.add(msg)
@@ -243,6 +244,26 @@ class MainActivity : ComponentActivity() {
 
         // 门锁协议处理 (NDEF 识别 + 0xB1 开锁 + 全量日志, 结果经 onUnlockResult 回主线程)
         nfcDoorLock.handleTag(tag)
+    }
+
+    /**
+     * 按设置同步「碰门锁本体」分发组件的启用状态。
+     * 禁用后系统不会再把这个 Activity 当作 TECH_DISCOVERED 的目标唤起，
+     * 从根上避免碰校园卡 / 公交卡时被误唤起。
+     */
+    private fun syncNfcTagDispatchComponent() {
+        val state = if (SettingsManager.nfcLockAsTagEnabled) {
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        } else {
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+        }
+        runCatching {
+            packageManager.setComponentEnabledSetting(
+                android.content.ComponentName(this, NfcTagDispatchActivity::class.java),
+                state,
+                PackageManager.DONT_KILL_APP,
+            )
+        }
     }
 
     private fun createNotificationChannel() {

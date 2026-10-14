@@ -45,13 +45,41 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
 
-            <!-- NFC 磁标签分发: 碰到写入 unlockdoor://open 的标签直接唤起开门 -->
+        <!--
+          NFC 触发的开门入口（无界面，确认命中才弹底部浮层）：
+            · unlockdoor:// 磁标签  → 直接开门
+            · 门锁本体感应区        → 按技术类型兜底分发，再靠 UID 里的 "XN-" 前缀与
+                                      deviceId 过滤，非门锁标签静默退出，连闪一下都没有。
+          放在这里而不是 MainActivity 上，是为了不让主界面挂一个可被任意 App / 网页
+          用自定义 scheme 唤起的 intent-filter。
+          本组件可被设置页动态禁用，禁用后系统不会再向它分发标签。
+        -->
+        <activity
+            android:name=".NfcTagDispatchActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SimpleUnlock.Overlay"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:stateNotNeeded="true">
+
+            <!-- 我们自己写入的磁标签 -->
             <intent-filter>
                 <action android:name="android.nfc.action.NDEF_DISCOVERED" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="unlockdoor" />
             </intent-filter>
+
+            <!-- 兜底：门锁感应区按技术类型匹配（过滤不了 UID，由代码再筛一道） -->
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.action.TECH_DISCOVERED"
+                android:resource="@xml/nfc_tech_filter" />
         </activity>
 
         <!-- 桌面小组件 -->

@@ -1,9 +1,6 @@
 package com.unlock.door
 
 import android.nfc.Tag
-import android.nfc.tech.IsoDep
-import android.nfc.tech.MifareClassic
-import android.nfc.tech.MifareUltralight
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
 import android.nfc.tech.NfcA
@@ -141,8 +138,8 @@ object NfcDoorLockManager {
     const val STICKER_UNLOCK = "__STICKER_BLE_UNLOCK__"
 
     /**
-     * UID 诊断: 住理门锁感应区 UID 常以 ASCII "XN-" 开头 (与 BLE 广播名 XN-<设备ID> 同源),
-     * 剩余 4 字节可能直接编码设备ID → 打印大端/小端两种解读并与配置对比, 供日志分析
+     * UID 诊断：住理门锁感应区 UID 以 ASCII "XN-" 开头，
+     * 其后 4 字节小端读取再右移 8 位即 deviceId（实测 58 4E 2D 00 81 D4 22 → 2282625）。
      */
     private fun diagnoseUid(uid: ByteArray) {
         val ascii = uid.joinToString("") {
@@ -150,24 +147,43 @@ object NfcDoorLockManager {
             if (c in 0x20..0x7E) c.toChar().toString() else "·"
         }
         appendLog("UID ASCII: \"$ascii\"")
-        if (uid.size >= 7 && uid[0] == 'X'.code.toByte() &&
-            uid[1] == 'N'.code.toByte() && uid[2] == '-'.code.toByte()
-        ) {
-            appendLog("UID 含 XN- 前缀 → 确认是住理门锁感应区")
-            val cfgId = if (SettingsManager.isInitialized()) SettingsManager.deviceId else 0
-            if (cfgId > 0) {
-                val be = ((uid[3].toInt() and 0xFF) shl 24) or ((uid[4].toInt() and 0xFF) shl 16) or
-                        ((uid[5].toInt() and 0xFF) shl 8) or (uid[6].toInt() and 0xFF)
-                val le = (uid[3].toInt() and 0xFF) or ((uid[4].toInt() and 0xFF) shl 8) or
-                        ((uid[5].toInt() and 0xFF) shl 16) or ((uid[6].toInt() and 0xFF) shl 24)
-                val match = when {
-                    be == cfgId -> "大端匹配 ✓"
-                    le == cfgId -> "小端匹配 ✓"
-                    else -> "与配置不一致 (以配置为准)"
-                }
-                appendLog("UID 内嵌数值: 大端=$be 小端=$le (当前配置=$cfgId, $match)")
-            }
+        appendLog("UID 原始字节: ${Crypto.bytesToHex(uid)}")
+
+        val id = deviceIdFromUid(uid) ?: run {
+            appendLog("UID 无 XN- 前缀 → 不是住理门锁感应区")
+            return
         }
+        appendLog("UID 含 XN- 前缀 → 确认为住理门锁感应区，内嵌 deviceId = $id")
+
+        val cfgId = if (SettingsManager.isInitialized()) SettingsManager.deviceId else 0
+        if (cfgId > 0) {
+            appendLog(if (id == cfgId) "与当前配置一致 ✓" else "与当前配置不一致 (配置为 $cfgId)")
+        }
+    }
+
+    /**
+     * 从住理门锁 UID 反推 deviceId。
+     *
+     * 实测样本：UID = `58 4E 2D 00 81 D4 22`
+     *  - 前 3 字节是固定 ASCII 前缀 `"XN-"`（与 BLE 广播名 `XN-<deviceId>` 同源）
+     *  - 后 4 字节按小端读 = 0x22D48100，右移 8 位 = 0x22D481 = 2282625 = deviceId
+     *    （等价说法：UID[4..6] 逆序即为 deviceId 的 3 字节大端表示）
+     *
+     * @return 反推出的 deviceId；若并非住理门锁标签则返回 null
+     */
+    fun deviceIdFromUid(uid: ByteArray): Int? {
+        if (uid.size < 7) return null
+        if (uid[0] != 'X'.code.toByte() ||
+            uid[1] != 'N'.code.toByte() ||
+            uid[2] != '-'.code.toByte()
+        ) return null
+
+        val raw = (uid[3].toInt() and 0xFF) or
+                ((uid[4].toInt() and 0xFF) shl 8) or
+                ((uid[5].toInt() and 0xFF) shl 16) or
+                ((uid[6].toInt() and 0xFF) shl 24)
+        val id = raw ushr 8
+        return if (id > 0) id else null
     }
 
     // ─── NDEF 读取与设备ID提取 ───
@@ -210,95 +226,52 @@ object NfcDoorLockManager {
         }
     }
 
-    // ─── 传输通道试探 ───
+    // ─── 传输通道（已收敛为 NfcA 单一通道）───
 
+    /** NfcA 发送重试次数（NFC 通信易被标签移动打断，官方 H5 同样是 3 次） */
+    private const val TRANSPORT_RETRIES = 3
+
+    /**
+     * 发送 0xB1 指令并取回响应。
+     *
+     * 为什么只走 NfcA（实测结论，2026-10-14 桃园七舍 332）：
+     *   门锁感应区是 ISO14443-A Type 2 标签，ATQA=4400 / SAK=0，techList 仅 NfcA。
+     *   SAK 的 bit6 未置位 → 不支持 ISO/IEC 14443-4 → IsoDep 必然不存在；
+     *   Type 2 也不是 Mifare Classic。官方原生层同样走 NfcA 裸帧直传
+     *   （0xB1 帧不是标准 APDU，不做 iso7816 封装）。
+     *   因此原先的「四通道逐一试探」已无意义，收敛为单一通道。
+     *
+     * 校验：响应必须以 0xB1 开头才算有效 —— 避免把错误响应当成果而提前返回。
+     */
     private fun tryTransports(tag: Tag, cmd: ByteArray): ByteArray? {
-        // 通道 1: IsoDep — 官方 20 字节帧风格与 ISO-DEP 最为契合, 首选
-        IsoDep.get(tag)?.let { iso ->
-            try {
-                iso.connect()
-                iso.timeout = 3000
-                appendLog("[通道1] IsoDep 连接 (hiLayer=${Crypto.bytesToHex(iso.hiLayerResponse ?: ByteArray(0))})")
-                var resp = iso.transceive(cmd)
-                appendLog("[通道1] ← 原始响应: ${Crypto.bytesToHex(resp)}")
-                resp = stripStatusWords(resp)
-                if (resp.isNotEmpty()) return resp
-            } catch (e: Exception) {
-                appendLog("[通道1] IsoDep 失败: ${e.message}")
-            } finally {
-                runCatching { iso.close() }
-            }
-        } ?: appendLog("[通道1] 无 IsoDep 技术")
+        val a = NfcA.get(tag)
+        if (a == null) {
+            appendLog("✗ 标签不支持 NfcA，无法发送 0xB1 指令")
+            return null
+        }
 
-        // 通道 2: NfcA 原始直传 (Type A 低层)
-        NfcA.get(tag)?.let { a ->
+        repeat(TRANSPORT_RETRIES) { attempt ->
             try {
                 a.connect()
-                a.timeout = 3000
-                appendLog("[通道2] NfcA ATQA=${Crypto.bytesToHex(a.atqa)} SAK=${a.sak} 最大收发=${a.maxTransceiveLength}B")
+                a.timeout = 2000
+                if (attempt == 0) {
+                    appendLog(
+                        "[NfcA] ATQA=${Crypto.bytesToHex(a.atqa)} SAK=${a.sak}" +
+                            " 最大收发=${a.maxTransceiveLength}B"
+                    )
+                }
                 val resp = a.transceive(cmd)
-                appendLog("[通道2] ← 响应: ${Crypto.bytesToHex(resp)}")
-                if (resp.isNotEmpty()) return resp
+                appendLog("[NfcA] ← 响应(${resp.size}B): ${Crypto.bytesToHex(resp)}")
+                if (resp.size >= 3 && resp[0] == 0xB1.toByte()) return resp
+                appendLog("[NfcA] 响应不是合法的 0xB1 帧，重试 (${attempt + 1}/$TRANSPORT_RETRIES)")
             } catch (e: Exception) {
-                appendLog("[通道2] NfcA 失败: ${e.message}")
+                appendLog("[NfcA] 第 ${attempt + 1} 次失败: ${e.message}")
             } finally {
                 runCatching { a.close() }
             }
         }
 
-        // 通道 3: MifareUltralight — 页面信息转储 (为后续适配收集情报)
-        MifareUltralight.get(tag)?.let { ul ->
-            try {
-                ul.connect()
-                ul.timeout = 2000
-                appendLog("[通道3] MifareUltralight type=${ul.type}")
-                for (page in 0..15) {
-                    runCatching {
-                        val data = ul.readPages(page)
-                        appendLog("[通道3] page$page: ${Crypto.bytesToHex(data)}")
-                    }
-                }
-            } catch (e: Exception) {
-                appendLog("[通道3] MifareUltralight 失败: ${e.message}")
-            } finally {
-                runCatching { ul.close() }
-            }
-        }
-
-        // 通道 4: MifareClassic — 信息转储
-        MifareClassic.get(tag)?.let { mc ->
-            try {
-                mc.connect()
-                appendLog("[通道4] MifareClassic size=${mc.size} sectors=${mc.sectorCount}")
-                runCatching {
-                    if (mc.authenticateSectorWithKeyA(1, MifareClassic.KEY_DEFAULT)) {
-                        val blk = mc.readBlock(mc.sectorToBlock(1))
-                        appendLog("[通道4] sector1/block0: ${Crypto.bytesToHex(blk)}")
-                    } else {
-                        appendLog("[通道4] sector1 默认密钥认证失败 (非默认密钥)")
-                    }
-                }
-            } catch (e: Exception) {
-                appendLog("[通道4] MifareClassic 失败: ${e.message}")
-            } finally {
-                runCatching { mc.close() }
-            }
-        }
-
+        appendLog("✗ NfcA 通道重试 $TRANSPORT_RETRIES 次仍未获得合法响应")
         return null
-    }
-
-    /** 剥离 ISO-DEP 响应尾部的状态字 SW1SW2 (9000/61xx/6xxx/63xx) */
-    private fun stripStatusWords(resp: ByteArray): ByteArray {
-        if (resp.size < 2) return resp
-        val sw1 = resp[resp.size - 2].toInt() and 0xFF
-        val sw2 = resp[resp.size - 1].toInt() and 0xFF
-        val isSw = (sw1 == 0x90 && sw2 == 0x00) || sw1 == 0x61 ||
-            (sw1 and 0xF0) == 0x60 || sw1 == 0x63
-        if (isSw) {
-            appendLog("  (剥离状态字 SW=${"%02X".format(sw1)}${"%02X".format(sw2)})")
-            return resp.copyOfRange(0, resp.size - 2)
-        }
-        return resp
     }
 }
