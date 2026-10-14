@@ -53,9 +53,8 @@
         android:textSize="10sp"
         android:textStyle="bold"
         android:gravity="center"
-        android:maxLines="1"
-        android:ellipsize="marquee"
-        android:singleLine="true" />
+        android:maxLines="3"
+        android:ellipsize="end" />
 
     <!-- 设备名 (仅宽版显示) -->
     <TextView

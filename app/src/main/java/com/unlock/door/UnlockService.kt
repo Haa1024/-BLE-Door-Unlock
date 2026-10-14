@@ -13,7 +13,7 @@ import kotlinx.coroutines.*
 
 class UnlockService : Service() {
 
-    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var unlockManager: BleUnlockManager? = null
     private var isRunning = false
     private var resetRunnable: Runnable? = null
@@ -27,13 +27,17 @@ class UnlockService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT)
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT)
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
         unlockManager = BleUnlockManager(this) { }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 自动恢复期间合并重复点击，保留当前重试次数和连接。
+        if (isRunning) return START_NOT_STICKY
         // 取消上一次的延迟重置
         resetRunnable?.let {
             Handler(Looper.getMainLooper()).removeCallbacks(it)
@@ -84,9 +88,28 @@ class UnlockService : Service() {
                     return@launch
                 }
 
-                updateNotification("开门中...", "正在发送凭证")
-                currentManager.unlock()
-                finish(true, "门已打开 🔓", currentRequestId)
+                coroutineScope {
+                    val updates = launch {
+                        currentManager.statusText.collect { message ->
+                            if (currentRequestId == requestId &&
+                                currentManager.state.value != BleUnlockManager.State.SUCCESS &&
+                                currentManager.state.value != BleUnlockManager.State.FAILED) {
+                                updateNotification("开门中...", message)
+                                val progressIntent = Intent(DoorLockWidgetProvider.ACTION_UPDATE_UI).apply {
+                                    setClass(this@UnlockService, DoorLockWidgetProvider::class.java)
+                                    putExtra("state", DoorLockWidgetProvider.STATE_UNLOCKING)
+                                    putExtra("message", message)
+                                }
+                                sendBroadcast(progressIntent)
+                            }
+                        }
+                    }
+                    try { currentManager.unlock() }
+                    finally { updates.cancelAndJoin() }
+                }
+                finish(true, currentManager.statusText.value, currentRequestId)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 finish(false, e.message ?: "开门失败", currentRequestId)
             }
@@ -99,6 +122,8 @@ class UnlockService : Service() {
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(true)
             .build()
@@ -111,6 +136,7 @@ class UnlockService : Service() {
         if (requestId != this.requestId) {
             return
         }
+        isRunning = false
 
         // 结果通知
         val intent = packageManager.getLaunchIntentForPackage(packageName)
@@ -122,6 +148,7 @@ class UnlockService : Service() {
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentTitle(if (success) "开门成功 🔓" else "开门失败")
             .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setContentIntent(pending)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -137,11 +164,17 @@ class UnlockService : Service() {
                 if (success) DoorLockWidgetProvider.STATE_SUCCESS
                 else DoorLockWidgetProvider.STATE_FAILED
             )
+            putExtra("message", if (success) "已开门 ✓" else "开门失败，请查看通知")
         }
         sendBroadcast(widgetIntent)
 
-        // 成功: 3 秒后还原; 失败: 1 秒后还原 (避免打断重试)
-        val delayMs = if (success) 3000L else 1000L
+        // 失败状态保留；服务立即退出，下一次点击可以开始新的尝试。
+        if (!success) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+            stopSelf()
+            return
+        }
+        val delayMs = 3000L
         val runnable = Runnable {
             // 再次检查 requestId
             if (this.requestId == requestId) {

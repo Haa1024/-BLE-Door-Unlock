@@ -80,7 +80,12 @@ object SettingsManager {
 
     var loginPhone: String
         get() = prefs.getString(KEY_LOGIN_PHONE, "") ?: ""
-        set(v) = prefs.edit().putString(KEY_LOGIN_PHONE, v).apply()
+        set(v) {
+            val editor = prefs.edit().putString(KEY_LOGIN_PHONE, v)
+            // 更换账号后重新选择，避免优先使用上一个账号的登录服务器。
+            if (v != loginPhone) editor.remove(KEY_SERVER_URL)
+            editor.apply()
+        }
 
     var loginPassword: String
         get() = prefs.getString(KEY_LOGIN_PASSWORD, "") ?: ""
@@ -90,8 +95,10 @@ object SettingsManager {
         get() = prefs.getString(KEY_PLATFORM_TOKEN, "") ?: ""
         set(v) = prefs.edit().putString(KEY_PLATFORM_TOKEN, v).apply()
 
-    val serverBaseUrl: String
-        get() = "https://pm.whxinna.com"
+    /** 上次登录成功的服务器；与获取门锁凭证的项目服务器分开保存。 */
+    var serverBaseUrl: String
+        get() = prefs.getString(KEY_SERVER_URL, "https://pm.whxinna.com") ?: "https://pm.whxinna.com"
+        set(v) = prefs.edit().putString(KEY_SERVER_URL, v).apply()
 
     var projectServerUrl: String
         get() = prefs.getString("project_server_url", "") ?: ""
