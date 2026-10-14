@@ -27,10 +27,10 @@ jobs:
       - name: 赋予 gradlew 执行权限
         run: chmod +x gradlew
 
-      # 签名密钥三级兜底:
-      #   1) GitHub Secrets 里的 KEYSTORE_BASE64 (推荐, 密钥不入库)
-      #   2) 仓库中提交的 release.keystore (git add -f release.keystore, 方便但密钥公开)
-      #   3) 都没有 → 现场生成临时密钥 (APK 可装可测, 但无法覆盖升级正式签名版)
+      # 签名密钥: 优先用 GitHub Secrets 里的 KEYSTORE_BASE64 (密钥不入库)。
+      # 未配置时现场生成临时密钥 —— 产出的 APK 可装可测，但无法覆盖升级正式签名版。
+      # 注意: 不要把 release.keystore 提交进仓库。本仓库是公开的，一旦提交即等于公开私钥，
+      #       任何人都能签出同包名同签名的包覆盖安装。
       - name: 准备签名密钥
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -38,10 +38,8 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
             echo "已从 Secrets 解码签名密钥"
-          elif [ -f release.keystore ]; then
-            echo "使用仓库中提交的 release.keystore"
           else
-            echo "警告: 未找到签名密钥, 生成临时密钥 (仅测试用)"
+            echo "警告: 未配置 KEYSTORE_BASE64, 生成临时密钥 (仅测试用)"
             keytool -genkeypair -v -keystore release.keystore -alias release \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass android -keypass android \
