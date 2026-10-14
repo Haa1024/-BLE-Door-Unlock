@@ -20,15 +20,14 @@ android {
         applicationId = "com.unlock.door"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.4.1-nfc"
+        versionCode = 7
+        versionName = "1.3.0"
     }
 
     buildTypes {
         release {
-            // 沙盒构建环境内存有限，关闭 R8 混淆压缩以稳定出包（功能无影响）
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
