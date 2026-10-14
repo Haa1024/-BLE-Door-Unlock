@@ -22,44 +22,24 @@
 
 ## 下载
 
-从 [Releases](../../releases) 页面下载最新 APK 直接安装；也可在 [Actions](../../actions) 每次构建的 Artifacts 里下载。
+从 [Releases](../../releases) 页面下载 APK 直接安装。Releases 里提供两个**包名不同、互不兼容**的变体，同一台手机只能留一个：
 
-## GitHub Actions 自动打包
+| 变体 | 包名 | 说明 |
+| --- | --- | --- |
+| **公开版**（推荐） | `com.unlock.door` | 常规版本，可与官方「住理生活」App 共存；碰锁开门走 `TECH_DISCOVERED` 分发 |
+| **鸠占鹊巢版** | `com.whxinna.userplatform` | **占用官方包名**。门锁标签里的 AAR 指名官方包名，占住它才能做到「碰锁免打开 App 直接开门」。装上后无法再装官方 App，配置也要重填 |
 
-本项目已内置 CI（`.github/workflows/android.yml`）：推送代码后 GitHub 自动编译 Release APK。
-
-1. 把项目推到 GitHub（首次）：
-   ```bash
-   git init && git add -A && git commit -m "init"
-   git branch -M main
-   git remote add origin https://github.com/<你的用户名>/<仓库名>.git
-   git push -u origin main
-   ```
-2. 构建 APK：推送任意代码自动触发；或在仓库 Actions 页面点 **Build APK → Run workflow** 手动触发。
-3. 取 APK：Actions 运行详情页底部 **Artifacts** 下载；打 `v*` 标签（`git tag v1.0 && git push --tags`）会自动发布到 **Releases**。
-4. 签名密钥（三选一，CI 自动识别）：
-   - **密钥入库（最简单）**：`.gitignore` 排除了 `*.keystore`，需强制提交：`git add -f release.keystore`。方便，但公开仓库等于密钥公开，自用可接受；
-   - **Secrets 注入（更安全）**：仓库 Settings → Secrets and variables → Actions 新建 `KEYSTORE_BASE64`，值为 `base64 -w0 release.keystore` 的输出；
-   - **都不配**：CI 现场生成临时密钥，APK 可装可测但无法覆盖升级正式签名版。
+> ⚠️ 鸠占鹊巢版是本地自用变体：`com.whxinna.userplatform` 是官方「住理生活」的包名，唯一合法归属方是官方。它被公开在这里只是为了留存构建产物，请勿再分发或用于任何商业用途。
 
 ## 使用方法
 
-### 1. 编译安装（可选）
-
-如需自行编译：
-
-```bash
-./gradlew assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
-```
-
-### 2. 配置凭证
+### 1. 配置凭证
 
 **方式一（推荐）**：在设置页登录住理生活账号 —— 手机号 + 密码，或点「支付宝一键登录」；登录后点"自动获取参数"
 
 **方式二**：手动填写设备 ID、项目 ID、凭证 ID、chainKey、MAC 地址
 
-### 3. 开门
+### 2. 开门
 
 **感应场**：点主界面正中央的圆盘（或底部按钮）即开门 —— 波圈的收缩节奏会跟着状态走，
 待机缓慢、开门时加快。也可以加一个桌面小组件一键开门，长按可拖放调整大小。
