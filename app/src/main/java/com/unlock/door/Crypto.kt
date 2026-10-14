@@ -377,4 +377,126 @@ object Crypto {
     }
 
     data class PackData(val packIndex: Int, val resultData: String)
+
+    // ═══ NFC 门锁协议 (0xB1) — 移植自官方 H5 nfcOpenDoorCommand.Z56WBVD_.js ═══
+    // 官方架构: 门锁感应区模拟 NDEF 标签 (URL 含设备ID), 手机作为读卡器
+    // 写入 0xB1 加密指令, 锁校验 projectId+chainKey 后返回新密钥 (密钥轮换)
+
+    const val NFC_CMD_HEADER = 0xB1
+    const val NFC_SUB_OPEN = 0x0D             // 开镜子命令 (帧内固定为 13)
+    const val NFC_RESP_CMD_CRC_ERROR = 0xF0   // 锁回应: 数据CRC错误 (echo 子命令)
+    const val NFC_RESP_CMD_UNKNOWN = 0xF1     // 锁回应: 未知命令 (echo 子命令)
+
+    /** NFC 结果码表 (源自 hooks.js 第二张映射表) */
+    val NFC_ERROR_MESSAGES = mapOf(
+        0 to "成功", 1 to "设备已被占用", 2 to "数据CRC校验错误", 3 to "生成随机密钥失败",
+        4 to "用户凭证保存失败", 5 to "开锁交换密钥失败", 6 to "解密随机密钥失败",
+        7 to "未找到用户信息", 8 to "钥匙类型不匹配", 9 to "管理员随机数不匹配",
+        10 to "门锁状态已打开", 11 to "已过有效期", 12 to "离线次数已用完",
+        13 to "用户凭证更新失败", 14 to "用户已删除", 15 to "项目ID不一致",
+        255 to "未知错误"
+    )
+
+    data class NfcParseResult(
+        val success: Boolean,
+        val resultCode: Int = -1,
+        val message: String = "",
+        val doorAlreadyOpen: Boolean = false,
+        val newChainKeyHex: String? = null,
+        val seq: Int? = null,
+        val error: String? = null
+    )
+
+    /**
+     * 构造 NFC 0xB1 开锁指令 (与 JS 端 b() 函数逐行对应)
+     *
+     * 帧格式: [0xB1][0x0D][密文长度(1B)][RC4密文][CRC8(1B)]
+     *   - 明文 = projectId(4B LE) + chainKey(原始字节)
+     *   - RC4 密钥 = deriveDeviceKey(deviceId)
+     *   - CRC8 输入 = [0x0D, 密文长度, ...明文] (对明文而非密文计算, 与 BLE 一致)
+     */
+    fun buildNfcOpenCommand(deviceId: Int, projectId: Int, chainKeyHex: String): ByteArray {
+        val chain = hexToBytes(chainKeyHex)
+        val plain = intToLe4(projectId) + chain
+        val cipher = rc4(plain, deriveDeviceKey(deviceId))
+
+        val packet = ByteArray(3 + cipher.size + 1)
+        packet[0] = NFC_CMD_HEADER.toByte()
+        packet[1] = NFC_SUB_OPEN.toByte()
+        packet[2] = cipher.size.toByte()
+        System.arraycopy(cipher, 0, packet, 3, cipher.size)
+
+        val crcInput = byteArrayOf(packet[1], packet[2]) + plain
+        packet[packet.size - 1] = crc8(crcInput).toByte()
+        return packet
+    }
+
+    /**
+     * 解析 NFC 0xB1 响应 (与 JS 端 I() 函数逐行对应)
+     *
+     * 帧格式: [0xB1][子命令][密文长度][RC4密文][CRC8]
+     *   - CRC8 输入 = [子命令, 密文长度, ...解密明文]
+     *   - 明文布局: [0]=结果码, [1..3]=保留, [4..35]=新chainKey(32B), [36..39]=seq(4B LE)
+     *   - 子命令 echo 0xF0=锁回报CRC错误 / 0xF1=锁回报未知命令
+     */
+    fun parseNfcResponse(raw: ByteArray, deviceId: Int): NfcParseResult {
+        if (raw.isEmpty()) return NfcParseResult(false, error = "响应为空")
+
+        // 帧头定位: 容忍传输层前缀干扰, 找 0xB1 开头的帧 (JS 为严格 raw[0]==0xB1)
+        var f: ByteArray? = null
+        for (start in 0..(raw.size - 4)) {
+            if ((raw[start].toInt() and 0xFF) == NFC_CMD_HEADER) {
+                f = raw.copyOfRange(start, raw.size); break
+            }
+        }
+        val frame = f ?: return NfcParseResult(
+            false, error = "响应不是NFC命令帧 (头8字节: ${bytesToHex(raw.copyOf(minOf(8, raw.size)))})"
+        )
+
+        val subCmd = frame[1].toInt() and 0xFF
+        if (subCmd == NFC_RESP_CMD_CRC_ERROR) return NfcParseResult(false, error = "锁回报: 数据CRC错误")
+        if (subCmd == NFC_RESP_CMD_UNKNOWN) return NfcParseResult(false, error = "锁回报: 未知命令")
+
+        val cipherLen = frame[2].toInt() and 0xFF
+        if (frame.size < 3 + cipherLen + 1) {
+            return NfcParseResult(false, error = "响应长度不足: ${frame.size} < ${3 + cipherLen + 1}")
+        }
+
+        val cipher = frame.copyOfRange(3, 3 + cipherLen)
+        val expectedCrc = frame[3 + cipherLen].toInt() and 0xFF
+        val decrypted = rc4(cipher, deriveDeviceKey(deviceId))
+        val actualCrc = crc8(byteArrayOf(frame[1], frame[2]) + decrypted)
+        if (actualCrc != expectedCrc) {
+            return NfcParseResult(false, error = "CRC校验失败: 期望$expectedCrc 实际$actualCrc")
+        }
+
+        val resultCode = decrypted[0].toInt() and 0xFF
+        val doorAlreadyOpen = resultCode == 10  // "门锁状态已打开"
+        val message = NFC_ERROR_MESSAGES[resultCode] ?: "未知结果码$resultCode"
+
+        var newKey: String? = null
+        var seq: Int? = null
+        if (resultCode == 0 || doorAlreadyOpen) {
+            // 全帧索引 [7..38] → 解密明文 [4..35] = 32字节新 chainKey
+            if (decrypted.size >= 36) {
+                newKey = bytesToHex(decrypted.copyOfRange(4, 36))
+            }
+            // 全帧索引 [39..42] → 解密明文 [36..39] = seq (uint32 LE)
+            if (decrypted.size >= 40) {
+                seq = (decrypted[36].toInt() and 0xFF) or
+                      ((decrypted[37].toInt() and 0xFF) shl 8) or
+                      ((decrypted[38].toInt() and 0xFF) shl 16) or
+                      ((decrypted[39].toInt() and 0xFF) shl 24)
+            }
+        }
+
+        return NfcParseResult(
+            success = resultCode == 0 || doorAlreadyOpen,
+            resultCode = resultCode,
+            message = message,
+            doorAlreadyOpen = doorAlreadyOpen,
+            newChainKeyHex = newKey,
+            seq = seq
+        )
+    }
 }

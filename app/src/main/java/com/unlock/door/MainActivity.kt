@@ -4,6 +4,7 @@ import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.nfc.NfcAdapter
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -65,6 +66,13 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    // ── NFC ──
+    private val nfcAdapter: NfcAdapter? by lazy { NfcAdapter.getDefaultAdapter(this) }
+    /** 是否处于写卡模式（控制写卡对话框显示） */
+    private val writeTagMode = mutableStateOf(false)
+    /** NFC 门锁开门管理器 (读卡器模式, 官方 0xB1 协议, 逆向自官方 H5) */
+    private val nfcDoorLock = NfcDoorLockManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -73,6 +81,16 @@ class MainActivity : ComponentActivity() {
         bleManager = BleUnlockManager(this) { msg ->
             logMessages.add(msg)
             if (logMessages.size > 100) logMessages.removeAt(0)
+        }
+
+        // NFC 门锁开门结果回调 (含磁标签触发 BLE 开门的特殊分支)
+        nfcDoorLock.onUnlockResult = { ok, msg ->
+            if (msg == NfcDoorLockManager.STICKER_UNLOCK) {
+                Toast.makeText(this, "NFC 标签触发开门...", Toast.LENGTH_SHORT).show()
+                doUnlock()
+            } else {
+                Toast.makeText(this, if (ok) "✓ $msg" else "✗ $msg", Toast.LENGTH_SHORT).show()
+            }
         }
 
         setContent {
@@ -91,6 +109,11 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                // NFC 写卡模式对话框
+                if (writeTagMode.value) {
+                    NfcWriteTagDialog(onCancel = { disableTagWriteMode() })
+                }
+
                 // 主界面 ↔ 设置 侧滑切换
                 AnimatedContent(
                     targetState = showSettings,
@@ -107,7 +130,10 @@ class MainActivity : ComponentActivity() {
                     },
                 ) { inSettings ->
                     if (inSettings) {
-                        SettingsScreen(onBack = { showSettings = false })
+                        SettingsScreen(
+                            onBack = { showSettings = false },
+                            onWriteNfcTag = { enableTagWriteMode() },
+                        )
                     } else {
                         val showLogs = SettingsManager.showLogs
                         UnlockScreen(
@@ -125,6 +151,98 @@ class MainActivity : ComponentActivity() {
 
         checkPermissions()
         createNotificationChannel()
+
+        // NFC 磁标签触发: 若本次启动由碰标签唤起（冷启动），直接开门
+        handleNfcIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // App 存活期间再次碰标签
+        handleNfcIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // App 前台时开启 NFC 读卡器模式:
+        // 官方架构: 门锁感应区 = NDEF 标签(含设备ID), 手机 = 读卡器, 碰锁即发 0xB1 指令开门
+        enableDoorLockReaderMode()
+    }
+
+    override fun onPause() {
+        runCatching { nfcAdapter?.disableReaderMode(this) }
+        super.onPause()
+    }
+
+    /** 开启读卡器模式 (覆盖 Type A/B/F, NDEF 由本 App 自行解析以便写卡/识别门锁标签) */
+    private fun enableDoorLockReaderMode() {
+        val adapter = nfcAdapter ?: return
+        if (!adapter.isEnabled) return
+        val options = Bundle().apply {
+            putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+        }
+        runCatching {
+            adapter.enableReaderMode(
+                this, tagCallback,
+                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+                    NfcAdapter.FLAG_READER_NFC_F or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                options,
+            )
+        }
+    }
+
+    // ─── NFC: 磁标签开门 ───
+
+    /** 处理 NFC 磁标签分发: 本 App 写入的 unlockdoor://open 标签 → 立即开门 (后台/冷启动场景) */
+    private fun handleNfcIntent(intent: Intent?) {
+        if (intent?.action == NfcAdapter.ACTION_NDEF_DISCOVERED) {
+            Toast.makeText(this, "NFC 触发开门...", Toast.LENGTH_SHORT).show()
+            doUnlock()
+        }
+    }
+
+    /** 进入写卡模式: 前台期间碰到的 NFC 标签将被写入开门指令 (读卡器模式已由 onResume 常开) */
+    private fun enableTagWriteMode() {
+        val adapter = nfcAdapter
+        if (adapter == null) {
+            Toast.makeText(this, "本机不支持 NFC", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!adapter.isEnabled) {
+            Toast.makeText(this, "NFC 已关闭, 请先到系统设置开启", Toast.LENGTH_LONG).show()
+            return
+        }
+        nfcDoorLock.writeCardMode = true
+        writeTagMode.value = true
+    }
+
+    private fun disableTagWriteMode() {
+        nfcDoorLock.writeCardMode = false
+        writeTagMode.value = false
+    }
+
+    /** ReaderMode 回调: 写卡模式优先写标签, 否则交给门锁协议处理 (含磁标签识别) */
+    private val tagCallback = NfcAdapter.ReaderCallback { tag ->
+        if (nfcDoorLock.writeCardMode) {
+            // 回调在 binder 线程, 切主线程做 UI 反馈
+            runOnUiThread {
+                val error = NfcTagHelper.writeUnlockTag(tag)
+                if (error == null) {
+                    Toast.makeText(
+                        this,
+                        "✓ 标签写入成功! 把它贴在门边, 手机碰一下即可开门",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    Toast.makeText(this, "✗ $error", Toast.LENGTH_LONG).show()
+                }
+                disableTagWriteMode()
+            }
+            return@ReaderCallback
+        }
+
+        // 门锁协议处理 (NDEF 识别 + 0xB1 开锁 + 全量日志, 结果经 onUnlockResult 回主线程)
+        nfcDoorLock.handleTag(tag)
     }
 
     private fun createNotificationChannel() {
@@ -544,6 +662,49 @@ private fun DisclaimerDialog(onAgree: () -> Unit, onDisagree: () -> Unit) {
         dismissButton = {
             TextButton(onClick = onDisagree) {
                 Text("不同意", color = Rust)
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(16.dp),
+    )
+}
+
+// ── NFC 标签写卡模式对话框 ──
+
+@Composable
+private fun NfcWriteTagDialog(onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Text(
+                "写入 NFC 标签",
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.Nfc,
+                    contentDescription = null,
+                    modifier = Modifier.size(52.dp),
+                    tint = Walnut,
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "请将手机背面贴稳空白 NFC 标签\n（推荐 NTAG213 / NTAG215）\n\n" +
+                        "会把「碰一碰开门」指令写入标签。\n" +
+                        "写好的标签贴在门边，之后手机碰一下即可自动开门。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 22.sp,
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onCancel) {
+                Text("取消", color = Rust)
             }
         },
         containerColor = MaterialTheme.colorScheme.surface,

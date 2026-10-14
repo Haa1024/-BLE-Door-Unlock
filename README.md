@@ -11,6 +11,8 @@
 ## 功能
 
 - 🔓 一键 BLE 蓝牙开门
+- 📶 **手机 NFC 碰锁感应区直接开门**（官方 0xB1 加密协议完整移植，密钥轮换，见 README-NFC.md）
+- 📶 NFC 磁标签碰一碰开门（设置页一键写卡，碰标签自动 BLE 开门）
 - 🔄 自动刷新凭证（离线次数用完时自动从服务器获取新 chainKey）
 - 🧩 桌面小组件（可拖放调整大小）
 - 🔑 住理生活账号登录，自动获取门锁参数
@@ -18,7 +20,25 @@
 
 ## 下载
 
-从 [Releases](../../releases) 页面下载最新 APK 直接安装。
+从 [Releases](../../releases) 页面下载最新 APK 直接安装；也可在 [Actions](../../actions) 每次构建的 Artifacts 里下载。
+
+## GitHub Actions 自动打包
+
+本项目已内置 CI（`.github/workflows/android.yml`）：推送代码后 GitHub 自动编译 Release APK。
+
+1. 把项目推到 GitHub（首次）：
+   ```bash
+   git init && git add -A && git commit -m "init"
+   git branch -M main
+   git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+   git push -u origin main
+   ```
+2. 构建 APK：推送任意代码自动触发；或在仓库 Actions 页面点 **Build APK → Run workflow** 手动触发。
+3. 取 APK：Actions 运行详情页底部 **Artifacts** 下载；打 `v*` 标签（`git tag v1.0 && git push --tags`）会自动发布到 **Releases**。
+4. 签名密钥（三选一，CI 自动识别）：
+   - **密钥入库（最简单）**：`.gitignore` 排除了 `*.keystore`，需强制提交：`git add -f release.keystore`。方便，但公开仓库等于密钥公开，自用可接受；
+   - **Secrets 注入（更安全）**：仓库 Settings → Secrets and variables → Actions 新建 `KEYSTORE_BASE64`，值为 `base64 -w0 release.keystore` 的输出；
+   - **都不配**：CI 现场生成临时密钥，APK 可装可测但无法覆盖升级正式签名版。
 
 ## 使用方法
 

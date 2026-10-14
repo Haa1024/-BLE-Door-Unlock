@@ -1,5 +1,6 @@
 package com.unlock.door
 
+import android.nfc.NfcAdapter
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -15,6 +16,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -27,7 +31,10 @@ import kotlinx.coroutines.launch
  * 设置页面 — 填入门锁参数并持久化保存
  */
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onWriteNfcTag: () -> Unit,
+) {
 
     var deviceId by remember { mutableStateOf(SettingsManager.deviceId.toString()) }
     var projectId by remember { mutableStateOf(SettingsManager.projectId.toString()) }
@@ -382,6 +389,142 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             Spacer(Modifier.height(8.dp))
+
+            // ── NFC 开锁 ──
+            val context = LocalContext.current
+            val nfcAdapter = remember { NfcAdapter.getDefaultAdapter(context) }
+            var showHceLog by remember { mutableStateOf(false) }
+
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "NFC 开锁",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    // ① 磁标签开门 (即写即用)
+                    Text(
+                        "① 磁标签开门 — 把写好指令的 NFC 标签贴在门边，手机碰一下自动开门",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        lineHeight = 16.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = onWriteNfcTag,
+                        enabled = nfcAdapter != null,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Walnut,
+                            disabledContainerColor = Walnut.copy(alpha = 0.4f),
+                        ),
+                    ) {
+                        Text("写入 NFC 标签", fontSize = 14.sp)
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    // ② 手机碰锁感应区开门 (官方 0xB1 协议已破解并移植)
+                    Text(
+                        "② 手机碰锁感应区开门 — App 前台时手机直接碰门锁感应区即可开门（官方 0xB1 协议已完整移植，需已填入凭证）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        lineHeight = 16.sp,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "流程: 读锁标签NDEF取设备ID (无NDEF则用已配置设备ID) → 写入 0xB1[RC4(projectId+chainKey)] → 锁返回新密钥(轮换)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        lineHeight = 16.sp,
+                    )
+                    TextButton(onClick = { showHceLog = true }) {
+                        Text("查看 NFC 通讯日志", fontSize = 13.sp, color = Walnut)
+                    }
+
+                    if (nfcAdapter == null) {
+                        Text(
+                            "本机不支持 NFC，NFC 相关功能不可用，BLE 开门不受影响",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Rust,
+                            lineHeight = 16.sp,
+                        )
+                    } else if (!nfcAdapter.isEnabled) {
+                        Text(
+                            "NFC 已关闭，请到系统设置开启",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Rust,
+                        )
+                    }
+                }
+            }
+
+            // NFC 通讯日志弹窗（每 0.5 秒自动刷新，碰锁时开着即可实时看到指令）
+            if (showHceLog) {
+                var logs by remember { mutableStateOf(NfcDoorLockManager.snapshotLog()) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        logs = NfcDoorLockManager.snapshotLog()
+                        kotlinx.coroutines.delay(500)
+                    }
+                }
+                val clipboard = LocalClipboardManager.current
+                AlertDialog(
+                    onDismissRequest = { showHceLog = false },
+                    title = { Text("NFC 通讯日志", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column {
+                            if (logs.isEmpty()) {
+                                Text(
+                                    "暂无日志（每 0.5 秒自动刷新）。\n\n" +
+                                        "实验步骤：保持本 App 停留在本页面，手机贴住门锁感应区 3~5 秒。\n" +
+                                        "正常应出现『═══ 标签发现 ═══』和 0xB1 指令记录；\n" +
+                                        "若始终无日志，请确认 NFC 已开启且手机碰的是锁的 NFC 感应区。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    lineHeight = 20.sp,
+                                )
+                            } else {
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Column {
+                                        logs.takeLast(30).forEach { line ->
+                                            Text(
+                                                line,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                lineHeight = 16.sp,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Row {
+                            if (logs.isNotEmpty()) {
+                                TextButton(onClick = {
+                                    clipboard.setText(AnnotatedString(logs.joinToString("\n")))
+                                }) { Text("复制全部", fontSize = 13.sp) }
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            TextButton(onClick = { showHceLog = false }) { Text("关闭") }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { NfcDoorLockManager.clearLog() }) { Text("清空") }
+                    },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(16.dp),
+                )
+            }
 
             // 保存按钮
             Button(
