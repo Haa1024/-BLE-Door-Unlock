@@ -51,11 +51,16 @@
         <!--
           NFC 触发的开门入口（无界面，确认命中才弹底部浮层）：
             · unlockdoor:// 磁标签  → 直接开门
-            · 门锁本体感应区        → 按技术类型兜底分发，再靠 UID 里的 "XN-" 前缀与
-                                      deviceId 过滤，非门锁标签静默退出，连闪一下都没有。
           放在这里而不是 MainActivity 上，是为了不让主界面挂一个可被任意 App / 网页
           用自定义 scheme 唤起的 intent-filter。
-          本组件可被设置页动态禁用，禁用后系统不会再向它分发标签。
+
+          这里**故意不注册 TECH_DISCOVERED**（技术类型兜底分发）：
+            实测确认 TECH 分发在门锁标签上不成立 —— 系统按技术类型匹配时，
+            NfcA 是所有 Type A 卡（校园卡 / 公交卡 / 银行卡）的公共基础技术，
+            既筛不出门锁，也唤不起可靠的分发；真正能命中门锁标签的只有
+            **NDEF + AAR 指名包名**这一条路（见「鸠占鹊巢」变体）。
+            公开版不占官方包名，AAR 指不到它，所以「碰锁免打开 App 开门」
+            这个能力在公开版上不存在，只保留磁标签入口。
         -->
         <activity
             android:name=".NfcTagDispatchActivity"
@@ -73,14 +78,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="unlockdoor" />
             </intent-filter>
-
-            <!-- 兜底：门锁感应区按技术类型匹配（过滤不了 UID，由代码再筛一道） -->
-            <intent-filter>
-                <action android:name="android.nfc.action.TECH_DISCOVERED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.nfc.action.TECH_DISCOVERED"
-                android:resource="@xml/nfc_tech_filter" />
         </activity>
 
         <!-- 桌面小组件 -->

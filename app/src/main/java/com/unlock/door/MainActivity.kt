@@ -76,7 +76,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         SettingsManager.init(this)
-        syncNfcTagDispatchComponent()
 
         bleManager = BleUnlockManager(this) { msg ->
             logMessages.add(msg)
@@ -253,30 +252,7 @@ class MainActivity : ComponentActivity() {
         nfcDoorLock.handleTag(tag)
     }
 
-    /**
-     * 按设置同步「碰门锁本体」分发组件的启用状态。
-     *
-     * 本 App 走的是 TECH_DISCOVERED 技术类型分发：NfcA 是几乎所有 Type A 卡的基础
-     * 技术，所以碰校园卡 / 公交卡 / 银行卡也会唤起本 Activity（非本锁会在里面立刻静默
-     * 退出，不显示任何界面）。关掉设置里那个开关就把组件动态禁掉，系统从根上不再分发。
-     *
-     * ⚠️ 禁用状态是**存在系统里的、不会自己消失** —— 关过之后即使换版本也仍是禁用态，
-     * 所以每次启动都按设置项重新同步一次，避免出现「碰锁没反应又找不到地方改回来」。
-     */
-    private fun syncNfcTagDispatchComponent() {
-        val state = if (SettingsManager.nfcLockAsTagEnabled) {
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-        } else {
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-        }
-        runCatching {
-            packageManager.setComponentEnabledSetting(
-                android.content.ComponentName(this, NfcTagDispatchActivity::class.java),
-                state,
-                PackageManager.DONT_KILL_APP,
-            )
-        }
-    }
+    // ─── 磁标签写卡 ───
 
     private fun createNotificationChannel() {
         val channel = android.app.NotificationChannel(

@@ -72,21 +72,6 @@ object SettingsManager {
         get() = prefs.getBoolean(KEY_SHOW_LOGS, false)  // 默认关闭
         set(v) = prefs.edit().putBoolean(KEY_SHOW_LOGS, v).apply()
 
-    // ─── 碰门锁本体触发开门（TECH_DISCOVERED 分发）───
-    private const val KEY_NFC_LOCK_AS_TAG = "nfc_lock_as_tag"
-
-    /**
-     * 是否允许「碰门锁本体」直接触发 BLE 开门。
-     *
-     * 开启后 App 会向系统注册 TECH_DISCOVERED 分发，于是**任何 NfcA 卡**
-     * （校园卡 / 公交卡 / 银行卡…）被碰到都会唤起 NfcTagDispatchActivity；
-     * 非门锁标签会在那里立刻静默退出，不显示任何界面。
-     * 关闭时该 Activity 会被动态禁用，系统不会再唤起它。
-     */
-    var nfcLockAsTagEnabled: Boolean
-        get() = prefs.getBoolean(KEY_NFC_LOCK_AS_TAG, true)
-        set(v) = prefs.edit().putBoolean(KEY_NFC_LOCK_AS_TAG, v).apply()
-
     // ─── 登录凭证（可选，用于在线开门重置离线计数器） ───
     private const val KEY_LOGIN_PHONE = "login_phone"
     private const val KEY_LOGIN_PASSWORD = "login_password"

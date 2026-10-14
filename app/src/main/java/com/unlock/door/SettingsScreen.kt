@@ -1,7 +1,5 @@
 package com.unlock.door
 
-import android.content.ComponentName
-import android.content.pm.PackageManager
 import android.nfc.NfcAdapter
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -533,62 +531,6 @@ fun SettingsScreen(
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
                     ) {
                         Text("查看 NFC 通讯日志", fontSize = 13.sp, color = SeuGreen)
-                    }
-
-                    Spacer(Modifier.height(18.dp))
-
-                    // ③ 碰门锁本体直接开门 (TECH_DISCOVERED 后台分发, 先用 UID 判定是否本门锁)
-                    var lockAsTag by remember { mutableStateOf(SettingsManager.nfcLockAsTagEnabled) }
-                    Text(
-                        "③ 碰门锁本体直接开门",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        "不必打开 App：解锁屏幕后碰一下门锁感应区就能开门。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SeuInkSoft,
-                        lineHeight = 18.sp,
-                    )
-                    PrincipleNote(
-                        body = "门锁感应区没有可供匹配的 NDEF 内容，系统只能按「技术类型」分发 —— " +
-                            "而 NfcA 几乎是所有 Type A 卡的基础技术，校园卡 / 公交卡 / 银行卡都会一起命中。\n" +
-                            "本 App 收到分发后再自己筛一道：UID 必须以 ASCII「XN-」开头，" +
-                            "由它反推的 deviceId 必须与上面配置的一致。任一条不满足就立刻静默退出，" +
-                            "连闪一下都没有 —— 不会去动别人的锁。\n" +
-                            "关掉下面这个开关，系统就完全不再分发（比静默退出更彻底）。",
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "启用（会响应所有 NfcA 卡）",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Switch(
-                            checked = lockAsTag,
-                            onCheckedChange = { v ->
-                                lockAsTag = v
-                                SettingsManager.nfcLockAsTagEnabled = v
-                                val state = if (v) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                                            else PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-                                runCatching {
-                                    context.packageManager.setComponentEnabledSetting(
-                                        ComponentName(context, NfcTagDispatchActivity::class.java),
-                                        state, PackageManager.DONT_KILL_APP,
-                                    )
-                                }
-                            },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = SeuSurface,
-                                checkedTrackColor = SeuGreen,
-                            ),
-                        )
                     }
 
                     if (nfcAdapter == null) {
