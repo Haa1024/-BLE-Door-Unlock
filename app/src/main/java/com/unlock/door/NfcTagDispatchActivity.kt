@@ -22,7 +22,7 @@ import com.unlock.door.ui.StatusGlyphView
  * NFC 触发的开门入口 —— 承接两类标签，确认命中才弹底部浮层，否则完全无感地静默退出。
  *
  * **入口一：我们自己写入的磁标签**（NDEF 内容形如 `unlockdoor://open`）
- *   标签里的 URI 本身就是入场券，直接开门，不再校验 UID。
+ *   标签里的 URI 本身就是入场券，直接开门，不再校验 UID。开锁走蓝牙。
  *
  * **入口二：门锁本体的感应区**（系统按 TECH_DISCOVERED 分发）
  *   这一层系统只能过滤到"技术类型"，而 NfcA 几乎是所有 Type A 卡的基础技术，
@@ -31,10 +31,23 @@ import com.unlock.door.ui.StatusGlyphView
  *     2. 从 UID[3..6] 小端读出后右移 8 位，得到 deviceId
  *     3. 反推的 deviceId 必须与设置页配置一致 —— 否则拒绝，不冒险去开别人的锁
  *
- * 通过之后才展示浮层：先是"正在开门…"的旋转环，收到 [UnlockService] 的结果后
- * 切换成苔绿对勾（逐笔描绘）/ 锈红叉号，停留片刻自己收起。
+ *   过闸之后优先用 **NFC 指令**开门：把 Tag 交给 [NfcDoorLockManager]，由它读 NDEF 取
+ *   deviceId、构造 0xB1 帧、经 NfcA.transceive 直发门锁感应区 —— 这正是官方 App
+ *   「碰一下」的原理，不用配对、不用开蓝牙。三次都没拿到合法响应时才回退蓝牙。
  *
- * 窗口特性：锁屏可见、全屏透明、**完全触摸穿透**——用户在任何界面下碰标签，
+ * ⚠️ **必须先解锁屏幕**。Android 10 起限制了后台 / 锁屏状态下的 Activity 启动，系统不会
+ *    在锁屏时把 NFC 分发投过来 —— 实测（Android 16）确认：锁屏碰锁毫无反应，解锁后碰锁
+ *    才会走到这里。所以任何文案都不要再说"锁屏也能开门"。
+ *    下面 configureWindow 里的 setShowWhenLocked / setTurnScreenOn 只是保险：万一某台设备
+ *    真在锁屏下投递了分发，也能正常显示并点亮屏幕。
+ *
+ * **开关**：设置页可以关掉「碰门锁本体直接开门」，关闭时本 Activity 被动态禁用，系统从
+ * 分发层就不再唤起它 —— 碰校园卡 / 公交卡也不会把本 App 叫起来。
+ *
+ * 通过之后才展示浮层：先是"正在开门…"的旋转环，收到结果后切换成东大绿对勾（逐笔描绘）/
+ * 砖红叉号，停留片刻自己收起。
+ *
+ * 窗口特性：全屏透明、**完全触摸穿透**——用户在任何界面下碰标签，
  * 这张卡片都不会抢走输入，看一眼就消失。
  */
 class NfcTagDispatchActivity : Activity() {
@@ -45,12 +58,23 @@ class NfcTagDispatchActivity : Activity() {
         /** 写进磁标签的自定义 scheme */
         private const val UNLOCK_SCHEME = "unlockdoor"
 
-        /** 开门超时兜底：超时后按失败收尾，避免卡片一直挂在屏幕上 */
-        private const val UNLOCK_TIMEOUT_MS = 10_000L
+        /** 开门超时兜底：超时后按失败收尾，避免卡片一直挂在屏幕上。NFC 三次重试 + 可能的蓝牙回退，给足余量 */
+        private const val UNLOCK_TIMEOUT_MS = 18_000L
 
         /** 成功/失败结果在屏幕上停留的时长 */
         private const val SUCCESS_HOLD_MS = 1200L
         private const val FAILURE_HOLD_MS = 2200L
+
+        /**
+         * NFC 命令连续 3 次未获得合法响应时，是否回退蓝牙。
+         *
+         * 3 次是 [NfcDoorLockManager] 里 [NfcDoorLockManager.TRANSPORT_RETRIES] 的固定行为，
+         * 这里只决定「3 次都失败之后」怎么办：
+         *   true  → 转蓝牙再试一轮（碰一下总归能开，代价是多花几秒）
+         *   false → 直接报错（纯 NFC，失败就失败）
+         * 真机确认 NFC 在后台分发的时序下每次都通之后，改成 false 即为纯 NFC。
+         */
+        private const val BLE_FALLBACK_ON_NFC_FAILURE = true
     }
 
     private var card: View? = null
@@ -81,7 +105,7 @@ class NfcTagDispatchActivity : Activity() {
         titleView = findViewById(R.id.card_title)
         subtitleView = findViewById(R.id.card_subtitle)
 
-        // 初始把卡片挪到屏幕外，等确认命中才让它滑进来
+        // 初始把卡片挪到屏幕外，等确认是门锁才让它滑进来
         card?.apply {
             alpha = 0f
             translationY = dp(130f)
@@ -108,12 +132,13 @@ class NfcTagDispatchActivity : Activity() {
 
     /**
      * 窗口配置：
-     *  - 锁屏之上可见 + 点亮屏幕（站在门口时手机多半是锁着的）
+     *  - 锁屏之上可见 + 点亮屏幕 —— **兜底，正常情况下不会生效**。
+     *    平台在锁屏时就不会把 NFC 分发投过来（Android 10+ 限制后台启动 Activity），
+     *    走到这里时屏幕必定已解锁。留着是为了万一某台设备真的投了分发，
+     *    不至于显示不出来、也不至于黑着屏看不清浮层
      *  - FLAG_NOT_FOCUSABLE 不带输入焦点，绝不弹输入法
      *  - FLAG_NOT_TOUCHABLE 整块浮层触摸穿透，用户该刷视频刷视频、该刷卡刷卡
      *    （必须与 NOT_FOCUSABLE 同时设置才生效）
-     *  - 系统栏显式"透出去"：Theme.Translucent 家族默认不绘制系统栏背景，
-     *    不显式处理会把状态栏涂黑
      */
     private fun configureWindow() {
         window.addFlags(
@@ -121,6 +146,7 @@ class NfcTagDispatchActivity : Activity() {
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         )
+        // 系统栏必须显式"透出去"，否则 Theme.Translucent 的默认行为会把状态栏涂黑
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -169,12 +195,11 @@ class NfcTagDispatchActivity : Activity() {
                 showFailure("还没有配置凭证，请先打开 App 填写")
                 return
             }
-            showLoading()
+            showLoading("正在连接 ${SettingsManager.bleName()}")
             startUnlockService()
             return
         }
 
-        // 入口二：门锁感应区 —— 先确认它真是住理的门锁，再动手
         val tag = intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG)
         if (tag == null) {
             Log.d(TAG, "intent 中无 Tag，忽略")
@@ -193,6 +218,7 @@ class NfcTagDispatchActivity : Activity() {
             return
         }
 
+        // 以下才是有反馈的分支：已经确认是住理门锁
         val configured = SettingsManager.deviceId
         if (deviceId != configured) {
             Log.d(TAG, "门锁标签 UID=$uidHex → deviceId=$deviceId，与配置 $configured 不一致")
@@ -205,9 +231,38 @@ class NfcTagDispatchActivity : Activity() {
             return
         }
 
-        Log.d(TAG, "命中门锁标签 UID=$uidHex → deviceId=$deviceId，触发 BLE 开门")
-        showLoading()
-        startUnlockService()
+        Log.d(TAG, "命中门锁标签 UID=$uidHex → deviceId=$deviceId，走 NFC 指令开门")
+        showLoading("正在向门锁发送开锁指令…")
+        unlockByNfc(tag)
+    }
+
+    /**
+     * 用 NFC 指令开门 —— 手机作为读卡器，对门锁感应区直接收发 0xB1 帧。
+     *
+     * 与蓝牙的区别：NFC 靠感应区取电，不需要配对、不需要开蓝牙，指令往返就是几次
+     * 毫秒级的 transceive。这正是官方 App「碰一下」的原理，也是本变体要走的路。
+     *
+     * 指令内部已带 3 次重试（`NfcDoorLockManager.TRANSPORT_RETRIES`），所以这里
+     * 收到失败意味着「3 次都没拿到合法 0xB1 响应」，才轮到下面的判断：
+     *   · 成功     → 浮层转绿对勾（chainKey 轮换已在 [NfcDoorLockManager] 内落盘）
+     *   · 其余失败 → 由 [BLE_FALLBACK_ON_NFC_FAILURE] 决定是回退蓝牙还是直接报错
+     */
+    private fun unlockByNfc(tag: Tag) {
+        NfcDoorLockManager.handleTag(tag) { ok, msg ->
+            if (isFinishing || isDestroyed || concluding) return@handleTag
+
+            when {
+                ok -> showSuccess()
+
+                BLE_FALLBACK_ON_NFC_FAILURE -> {
+                    Log.w(TAG, "NFC 开门未成功（$msg），回退蓝牙重试")
+                    showLoading("NFC 未成功，转蓝牙重试…")
+                    startUnlockService()
+                }
+
+                else -> showFailure(msg.ifBlank { "请重试" })
+            }
+        }
     }
 
     private fun startUnlockService() {
@@ -241,9 +296,9 @@ class NfcTagDispatchActivity : Activity() {
 
     // ─────────────────────────── 浮层三态 ───────────────────────────
 
-    private fun showLoading() {
+    private fun showLoading(message: String) {
         titleView?.text = "正在开门…"
-        subtitleView?.text = "正在连接 ${SettingsManager.bleName()}"
+        subtitleView?.text = message
         glyph?.setLoading()
         slideIn()
         armTimeout()

@@ -37,11 +37,12 @@ class StatusGlyphView @JvmOverloads constructor(
 
     enum class Mode { LOADING, SUCCESS, FAILED }
 
-    // 与 Compose 主题 (ui/theme/Theme.kt) 同一套暖色
-    private val walnut = Color.parseColor("#5C3D1E")
-    private val moss   = Color.parseColor("#4A7C59")
-    private val rust   = Color.parseColor("#C44B4B")
-    private val white  = Color.WHITE
+    // 与 Compose 主题 (ui/theme/Theme.kt) 同一套东大绿配色
+    //   LOADING 用中性灰绿 —— 过程不该抢戏，绿色留给「成功了」那一下
+    private val loadingTint  = Color.parseColor("#9AA094")
+    private val seuGreenDeep = Color.parseColor("#47701F") // 东大绿 #4C7D2C 的深一档，圆底更有分量
+    private val seuRed       = Color.parseColor("#C0392B")
+    private val white        = Color.WHITE
 
     private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -182,7 +183,7 @@ class StatusGlyphView @JvmOverloads constructor(
         val cy = height / 2f
 
         if (mode == Mode.LOADING) {
-            arcPaint.color = walnut
+            arcPaint.color = loadingTint
             arcPaint.strokeWidth = s * 0.088f
             val r = s * 0.35f
             val oval = RectF(cx - r, cy - r, cx + r, cy + r)
@@ -190,7 +191,7 @@ class StatusGlyphView @JvmOverloads constructor(
             return
         }
 
-        val accent = if (mode == Mode.SUCCESS) moss else rust
+        val accent = if (mode == Mode.SUCCESS) seuGreenDeep else seuRed
 
         // 涟漪
         if (rippleAlpha > 0.01f) {

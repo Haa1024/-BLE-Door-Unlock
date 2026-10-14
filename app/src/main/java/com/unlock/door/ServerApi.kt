@@ -30,6 +30,13 @@ object ServerApi {
     private fun apiServer(): String =
         SettingsManager.projectServerUrl.ifBlank { "https://pm.whxinna.com" }
 
+    /**
+     * 平台服务器 —— 固定 pm，不随项目走。
+     * H5 里平台客户端 `je` 的 baseURL 就是硬编码的 pm.whxinna.com；
+     * webapi/oauth 下的接口全是平台级，挂项目服务器会 400。
+     */
+    private const val PLATFORM_SERVER = "https://pm.whxinna.com"
+
     private fun generateTimestamp(): String = (System.currentTimeMillis() / 1000).toString()
 
     private fun generateNonce(): String {
@@ -600,6 +607,136 @@ object ServerApi {
             }
         } catch (e: IOException) {
             emptyList()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  支付宝快捷登录
+    //  完全复刻官方 H5 登录页 (public/js/phone.D9sxfyEG.js) 的三步：
+    //    ① GET /webapi/oauth/alipay/auth_info  → authStr
+    //    ② 支付宝 SDK AuthTask.authV2(authStr) → auth_code
+    //    ③ GET /webapi/oauth/login             → platform_token
+    //  ① 免 token；③ 的请求体是 base64_* 形式，见 jsEncode 注释。
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * 还原 H5 客户端的 `encode()`：
+     *   btoa(encodeURIComponent(str).replace(/%XX/g, 对应字节)) 再把 + / 换成 - _
+     *
+     * 对纯 ASCII 的 JSON 而言，「encodeURIComponent 再逐字节还原」恒等于原串，
+     * 所以这里等价于 base64(UTF-8)，只是把 URL-safe 字符换掉。
+     */
+    private fun jsEncode(json: String): String =
+        android.util.Base64
+            .encodeToString(json.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+            .replace('+', '-')
+            .replace('/', '_')
+
+    /** 还原 H5 客户端的 `decode()`：base64 → UTF-8；data 里可能还套了一层 JSON 引号 */
+    private fun decodeDataText(data: String): String {
+        val decoded = decodeBase64Data(data).trim()
+        if (decoded.length >= 2 && decoded.startsWith("\"") && decoded.endsWith("\"")) {
+            return runCatching { org.json.JSONTokener(decoded).nextValue() as String }
+                .getOrElse { decoded }
+        }
+        return decoded
+    }
+
+    /** 响应里的 data 字段（base64 过的 JSON 对象）→ JSONObject */
+    private fun decodeDataObject(json: JSONObject): JSONObject? {
+        json.optJSONObject("data")?.let { return it }
+        val b64 = json.optString("data", "")
+        if (b64.isBlank()) return null
+        return runCatching { JSONObject(decodeDataText(b64)) }.getOrNull()
+    }
+
+    private fun errOf(json: JSONObject, fallback: String): String =
+        json.optString("msg", "").ifBlank { json.optString("err_msg", fallback) }
+
+    /**
+     * ① 取支付宝授权串 authStr。
+     * 实测：该端点**不需要登录 token**，也不校验包名 / 签名 / versionName，
+     * 任何人带正确签名都能拿到一份服务端 RSA2 签名过的授权串。
+     */
+    suspend fun fetchAlipayAuthInfo(): String = withContext(Dispatchers.IO) {
+        val signed = signRequest()
+        val query = signed.entries.joinToString("&") { "${it.key}=${it.value}" }
+        val url = "$PLATFORM_SERVER/webapi/oauth/alipay/auth_info?$query"
+        android.util.Log.d("ServerApi", "auth_info 请求: $url")
+
+        val request = Request.Builder().url(url).get().build()
+        val response = client.newCall(request).execute()
+        val bodyStr = response.body?.string() ?: ""
+        android.util.Log.d("ServerApi", "auth_info 响应 code=${response.code} body=${bodyStr.take(300)}")
+
+        val json = runCatching { JSONObject(bodyStr) }.getOrElse {
+            throw Exception("授权信息解析失败 (${response.code})")
+        }
+        if (!json.optBoolean("result", false)) throw Exception(errOf(json, "获取授权信息失败"))
+
+        val authStr = decodeDataText(json.optString("data", ""))
+        if (authStr.isBlank()) throw Exception("授权信息为空")
+        authStr
+    }
+
+    /** ③ 拿支付宝返回的 auth_code 换平台 token */
+    suspend fun loginByAlipayAuthCode(authCode: String): LoginResult = withContext(Dispatchers.IO) {
+        try {
+            val systemInfo = JSONObject()
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .put("systemType", "android")
+                .put("systemVersion", android.os.Build.VERSION.RELEASE)
+                .put("deviceModel", android.os.Build.MODEL)
+                .put("deviceToken", "")
+            val authInfo = JSONObject()
+                .put("auth_code", authCode)
+                .put("oauth_type", "alipay_app")
+                .put("sign_type", "RSA")
+
+            val signed = signRequest(
+                "base64_systemInfo" to jsEncode(systemInfo.toString()),
+                "base64_authInfo" to jsEncode(authInfo.toString()),
+                "app_version" to BuildConfig.VERSION_NAME,
+            )
+            val query = signed.entries.joinToString("&") { "${it.key}=${it.value}" }
+            val url = "$PLATFORM_SERVER/webapi/oauth/login?$query"
+            android.util.Log.d("ServerApi", "支付宝登录请求: $url")
+
+            val request = Request.Builder().url(url).get().build()
+            val response = client.newCall(request).execute()
+            val bodyStr = response.body?.string() ?: ""
+            android.util.Log.d("ServerApi", "支付宝登录响应 code=${response.code} body=${bodyStr.take(600)}")
+
+            val json = runCatching { JSONObject(bodyStr) }.getOrElse {
+                return@withContext LoginResult(false, error = "响应解析失败 (${response.code})")
+            }
+            if (!json.optBoolean("result", false)) {
+                return@withContext LoginResult(false, error = errOf(json, "支付宝登录失败"))
+            }
+            val data = decodeDataObject(json)
+                ?: return@withContext LoginResult(false, error = "返回数据为空")
+
+            val token = data.optString("platform_token", "")
+            if (token.isBlank()) {
+                return@withContext LoginResult(false, error = "未返回 platform_token")
+            }
+
+            data.optJSONObject("user_info")?.let { ui ->
+                ui.optString("id", "").takeIf { it.isNotBlank() }?.let { SettingsManager.userId = it }
+                ui.optString("identity_code", "").takeIf { it.isNotBlank() }?.let {
+                    SettingsManager.identityCode = it
+                }
+                ui.optString("phone", "").takeIf { it.isNotBlank() }?.let {
+                    SettingsManager.loginPhone = it
+                }
+            }
+            data.optJSONObject("server_info")?.let { parseServerInfo(it) }
+
+            SettingsManager.platformToken = token
+            val pname = data.optJSONObject("server_info")?.optString("projectname", "") ?: ""
+            LoginResult(true, token, pname.ifBlank { "支付宝登录成功" })
+        } catch (e: Exception) {
+            LoginResult(false, error = "${e.javaClass.simpleName}: ${e.message}")
         }
     }
 }

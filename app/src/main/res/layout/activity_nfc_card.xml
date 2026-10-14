@@ -42,7 +42,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:fontFamily="sans-serif-medium"
-                android:textColor="#1A1814"
+                android:textColor="#231815"
                 android:textSize="16sp" />
 
             <TextView
@@ -52,7 +52,7 @@
                 android:layout_marginTop="3dp"
                 android:ellipsize="end"
                 android:maxLines="2"
-                android:textColor="#8B8578"
+                android:textColor="#6B7066"
                 android:textSize="13sp" />
         </LinearLayout>
     </LinearLayout>

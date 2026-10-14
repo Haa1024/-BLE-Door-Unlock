@@ -20,8 +20,8 @@ android {
         applicationId = "com.unlock.door"
         minSdk = 24
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
     }
 
     buildTypes {
@@ -38,6 +38,8 @@ android {
 
     buildFeatures {
         compose = true
+        // 生成 BuildConfig.VERSION_NAME —— 支付宝登录请求要带 app_version
+        buildConfig = true
     }
 
     composeOptions {
@@ -77,4 +79,7 @@ dependencies {
 
     // HTTP (OkHttp for server API calls)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // 支付宝 SDK —— 与官方 App 同版本 (Msp/15.8.17)，用于支付宝快捷登录
+    implementation("com.alipay.sdk:alipaysdk-android:15.8.17")
 }

@@ -60,33 +60,42 @@
 走服务器中继：H5 调服务端接口拿指令包 → 写入标签 → 响应回传服务端 → 服务端下发下一包。
 凭证（credential_id + chainKey）最终由服务端下发。本 App 简化：直接在设置页填入 BLE 激活时获得的凭证，NFC/BLE 通用。
 
-## 三、传输通道说明（唯一未确定点）
+## 三、传输通道（已实测确定）
 
 官方原生层（`zl.nfc.write`）的标签级通信实现在加固的 dex 里（梆梆加固
 libSecShell.so，assets/classes0.jar 为加密载荷，无法静态脱壳）。
 
-本 App 的策略：**多通道逐一试探**（NfcDoorLockManager.tryTransports）：
+但真机实测已经给出答案：**只有 `NfcA.transceive(0xB1帧)` 一条通道有效**。
 
-1. `IsoDep.transceive(0xB1帧)` — 最可能（20字节帧风格与 BLE 一致）
-2. `NfcA.transceive(0xB1帧)` — Type A 低层
-3. `MifareUltralight` / `MifareClassic` — 页面/块转储（收集情报）
+```
+门锁感应区 = ISO14443-A Type 2 标签，ATQA=4400 / SAK=0，techList 仅 NfcA
+  · SAK bit6 未置位 → 不支持 ISO/IEC 14443-4 → IsoDep 必然不存在
+  · Type 2 不是 Mifare Classic
+  · 0xB1 帧也不是标准 APDU，不做 iso7816 封装
+```
 
-每一步都有全量日志（设置 → NFC 通讯日志），无论成功失败，
-日志都能定位真实通道。
+因此 `NfcDoorLockManager.tryTransports` 已从「四通道逐一试探」**收敛为单一 NfcA**：
 
-### 如需彻底确定通道：脱壳官方 APK
+1. 每轮重新 `NfcA.get(tag)`（上一轮 `close()` 过的实例不复用）
+2. `transceive(0xB1帧)`，超时 2 秒；响应必须以 `0xB1` 开头才算有效
+   —— 否则会把错误响应当成果提前返回
+3. 失败重试 3 次，轮间留 150ms 空档（TagLost 后立刻重连，
+   NFC 控制器往往还没从射频异常里恢复，不留空档等于只有第一次算数）
 
-1. 安装官方住理生活 App v3.11.51
-2. 使用 BlackDex（免 root）在手机上转储解密后的 dex
-3. jadx 打开 dump 出的 dex，找 `com.whxinna.nfc` 包，阅读 `zl.nfc.write` 的实现
+全程有日志（设置 → NFC 通讯日志），无论成功失败都能定位问题。
 
 ## 四、使用说明
 
-1. **手机碰锁感应区开门**：打开本 App（保持前台），手机贴住锁的 NFC 感应区 1~3 秒
+1. **手机碰锁感应区开门（App 前台）**：打开本 App，手机贴住锁的 NFC 感应区 1~3 秒
    - 前提：设置页已填入 projectId + chainKey（BLE 激活获得的凭证）
    - NFC 保持开启；碰锁时如弹出小米钱包刷卡动画，请在钱包中关闭"门钥匙"功能
-2. **磁标签开门**：设置 → 写入 NFC 标签 → 碰一张空白标签 → 贴门边，碰一下走 BLE 开门
-3. **排查问题**：设置 → 查看 NFC 通讯日志（实时刷新，可一键复制）
+2. **碰锁直接开门（不必打开 App）**：**先解锁屏幕**，把手机贴上门锁感应区即可
+   - ⚠️ 锁屏状态无效 —— Android 10 起限制后台启动 Activity，系统不会在锁屏时
+     投递 NFC 分发。实测确认锁屏碰锁毫无反应，解锁后才会走到开门流程
+   - 非门锁标签（校园卡 / 公交卡 / 银行卡）会立刻静默退出，不显示任何界面
+   - 设置页「碰门锁本体直接开门」开关可整体关掉此能力（动态禁用分发组件）
+3. **磁标签开门**：设置 → 写入 NFC 标签 → 碰一张空白标签 → 贴门边，碰一下走 BLE 开门
+4. **排查问题**：设置 → 查看 NFC 通讯日志（实时刷新，可一键复制）
 
 ## 五、版本历史
 
@@ -96,3 +105,6 @@ libSecShell.so，assets/classes0.jar 为加密载荷，无法静态脱壳）。
 - v1.4.1-nfc：**无 NDEF 回退** — 实测锁感应区为无 NDEF 的 NfcA 卡 (UID "XN-" 前缀)，
   碰锁不再拒绝而是自动用已配置设备ID发 0xB1；修正 SKIP_NDEF_CHECK 下 NDEF 读不出的问题；
   增加 UID ASCII/内嵌设备ID 大小端诊断日志（版本 code 6）
+- v1.4.0：**通道收敛 + 碰锁直发 NFC 指令** — tryTransports 从四通道盲试收敛为
+  单一 NfcA（实测 SAK=0 排除 IsoDep/Classic）；每次重试重新 connect + 150ms 空档；
+  后台碰锁改为「NFC 三次失败才回退蓝牙」；修正"锁屏也能开门"的错误文案（版本 code 8）

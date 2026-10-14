@@ -18,8 +18,8 @@ import java.util.concurrent.Executors
  *   2. 写入 0xB1 开锁指令: [B1][0D][密文长度][RC4(projectId+chainKey)][CRC8]
  *   3. 锁返回新 chainKey (密钥轮换) + 结果码
  *
- * 传输通道由官方原生层实现 (dex 已加固), 本单例对多种通道逐一试探并记录全量日志,
- * 命中 0xB1 合法响应即成功; 未命中时把日志发回分析即可。
+ * 传输通道实测只有 NfcA 一条（门锁感应区是 ISO14443-A Type 2，无 IsoDep / 非 Mifare Classic），
+ * 因此收敛为 NfcA 裸帧直传 + 3 次重试，全程记录通讯日志；命中 0xB1 合法响应即成功。
  */
 object NfcDoorLockManager {
 
@@ -30,7 +30,7 @@ object NfcDoorLockManager {
     @Volatile
     var writeCardMode: Boolean = false
 
-    /** UI 回调 (主线程): 开锁结果 */
+    /** UI 回调 (主线程): 开锁结果 —— 前台读卡器模式用；后台分发走 handleTag 的 callback 参数 */
     var onUnlockResult: ((ok: Boolean, message: String) -> Unit)? = null
 
     // ─── 通讯日志 (环形缓冲) ───
@@ -49,26 +49,36 @@ object NfcDoorLockManager {
 
     fun clearLog() = synchronized(logBuf) { logBuf.clear() }
 
-    // ─── 标签处理入口 (ReaderMode 回调线程调用) ───
+    // ─── 标签处理入口 (ReaderMode 回调线程 / 后台分发的 Activity 均可调用) ───
 
-    fun handleTag(tag: Tag) {
+    /**
+     * 处理一个 NFC 标签：识别 NDEF/UID → 构造 0xB1 指令 → NfcA 收发 → 解析结果。
+     *
+     * @param callback 指定时结果只回给这个调用方；不指定则回给全局的 [onUnlockResult]
+     *                 （前台读卡器模式由 MainActivity 使用）。两者互不干扰，
+     *                 避免后台碰锁的浮层与前台界面抢同一个回调。
+     */
+    fun handleTag(tag: Tag, callback: ((Boolean, String) -> Unit)? = null) {
         executor.execute {
             val result = runCatching { processTag(tag) }
                 .getOrElse { appendLog("✗ 处理异常: ${it.message}"); null }
             result?.let { (ok, msg) ->
-                mainHandler.post { onUnlockResult?.invoke(ok, msg) }
+                mainHandler.post {
+                    if (callback != null) callback.invoke(ok, msg)
+                    else onUnlockResult?.invoke(ok, msg)
+                }
             }
         }
     }
 
-    /** @return (是否成功, 提示消息); null = 仅记录日志不提示 */
+    /** @return (是否成功, 提示消息) */
     private fun processTag(tag: Tag): Pair<Boolean, String>? {
         appendLog("═══ 标签发现 ═══")
         appendLog("技术: ${tag.techList.joinToString(",") { it.substringAfterLast('.') }}")
         appendLog("UID: ${Crypto.bytesToHex(tag.id)}")
         diagnoseUid(tag.id)
 
-        // ── 0. 读 NDEF → 判断标签类型 ──
+        // ── 0. 读 NDEF → 判断标签类型（门锁感应区自带 NDEF，URI 形如 ?t=lock&d=<id>）──
         val (uri, ndefDeviceId) = readTagIdentity(tag)
 
         if (writeCardMode) {
@@ -134,7 +144,10 @@ object NfcDoorLockManager {
         return Pair(true, result.message)
     }
 
-    /** 磁标签触发 BLE 开门的特殊标记 */
+    /**
+     * 磁标签触发 BLE 开门的特殊标记 —— processTag 把它当作消息回给 MainActivity，
+     * 由后者转去调蓝牙开门（NFC 标签本身只负责"唤起"，真正的开锁指令走 BLE）。
+     */
     const val STICKER_UNLOCK = "__STICKER_BLE_UNLOCK__"
 
     /**
@@ -231,6 +244,18 @@ object NfcDoorLockManager {
     /** NfcA 发送重试次数（NFC 通信易被标签移动打断，官方 H5 同样是 3 次） */
     private const val TRANSPORT_RETRIES = 3
 
+    /** 单次 transceive 的超时（毫秒） */
+    private const val TRANSPORT_TIMEOUT_MS = 2000
+
+    /**
+     * 两次重试之间的间隔（毫秒）。
+     *
+     * 为什么必须有：TagLost 之后立刻重连，NFC 控制器往往还没从上一轮的射频异常里
+     * 恢复，必然再失败一次 —— 三次重试会退化成「只有第一次算数」。留一点空档
+     * 让控制器回收，才是真的三次机会。
+     */
+    private const val RETRY_GAP_MS = 150L
+
     /**
      * 发送 0xB1 指令并取回响应。
      *
@@ -242,36 +267,47 @@ object NfcDoorLockManager {
      *   因此原先的「四通道逐一试探」已无意义，收敛为单一通道。
      *
      * 校验：响应必须以 0xB1 开头才算有效 —— 避免把错误响应当成果而提前返回。
+     *
+     * 重试 3 次，全部失败才返回 null（调用方据此回退蓝牙）。每轮都重新取一次
+     * NfcA 实例并重新 connect，轮间留 [RETRY_GAP_MS] 空档，见该常量的说明。
      */
     private fun tryTransports(tag: Tag, cmd: ByteArray): ByteArray? {
-        val a = NfcA.get(tag)
-        if (a == null) {
-            appendLog("✗ 标签不支持 NfcA，无法发送 0xB1 指令")
-            return null
-        }
-
         repeat(TRANSPORT_RETRIES) { attempt ->
+            val round = attempt + 1
+
+            // 每轮重新从 Tag 取实例：上一轮 close() 过的实例不再复用
+            val a = NfcA.get(tag)
+            if (a == null) {
+                appendLog("✗ 标签不支持 NfcA，无法发送 0xB1 指令")
+                return null
+            }
+
             try {
                 a.connect()
-                a.timeout = 2000
+                a.timeout = TRANSPORT_TIMEOUT_MS
                 if (attempt == 0) {
                     appendLog(
                         "[NfcA] ATQA=${Crypto.bytesToHex(a.atqa)} SAK=${a.sak}" +
                             " 最大收发=${a.maxTransceiveLength}B"
                     )
                 }
+                appendLog("[NfcA] → 第 $round/$TRANSPORT_RETRIES 次发送 (${cmd.size}B)")
                 val resp = a.transceive(cmd)
                 appendLog("[NfcA] ← 响应(${resp.size}B): ${Crypto.bytesToHex(resp)}")
                 if (resp.size >= 3 && resp[0] == 0xB1.toByte()) return resp
-                appendLog("[NfcA] 响应不是合法的 0xB1 帧，重试 (${attempt + 1}/$TRANSPORT_RETRIES)")
+                appendLog("[NfcA] 第 $round/$TRANSPORT_RETRIES 次响应不是合法 0xB1 帧")
             } catch (e: Exception) {
-                appendLog("[NfcA] 第 ${attempt + 1} 次失败: ${e.message}")
+                appendLog("[NfcA] 第 $round/$TRANSPORT_RETRIES 次失败: ${e.message}")
             } finally {
                 runCatching { a.close() }
             }
+
+            if (attempt < TRANSPORT_RETRIES - 1) {
+                runCatching { Thread.sleep(RETRY_GAP_MS) }
+            }
         }
 
-        appendLog("✗ NfcA 通道重试 $TRANSPORT_RETRIES 次仍未获得合法响应")
+        appendLog("✗ NfcA $TRANSPORT_RETRIES 次尝试均未获得合法响应 → 交给调用方回退蓝牙")
         return null
     }
 }

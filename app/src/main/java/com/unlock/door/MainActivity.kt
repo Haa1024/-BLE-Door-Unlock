@@ -13,27 +13,23 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -46,6 +42,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
 
@@ -113,6 +112,14 @@ class MainActivity : ComponentActivity() {
                 // NFC 写卡模式对话框
                 if (writeTagMode.value) {
                     NfcWriteTagDialog(onCancel = { disableTagWriteMode() })
+                }
+
+                // 主界面铺的是浅绿感应场，系统栏必须跟着走 —— 否则顶上会留一条
+                // #F7F9F5 的断层，整块"场"就破了。
+                val barColor = if (showSettings) SeuBg else SeuGreenField
+                SideEffect {
+                    window.statusBarColor = barColor.toArgb()
+                    window.navigationBarColor = barColor.toArgb()
                 }
 
                 // 主界面 ↔ 设置 侧滑切换
@@ -192,7 +199,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ─── NFC: 磁标签开门 ───
+    // ─── NFC: 磁标签 / 碰门锁 ───
 
     /** 处理 NFC 磁标签分发: 本 App 写入的 unlockdoor://open 标签 → 立即开门 (后台/冷启动场景) */
     private fun handleNfcIntent(intent: Intent?) {
@@ -248,8 +255,13 @@ class MainActivity : ComponentActivity() {
 
     /**
      * 按设置同步「碰门锁本体」分发组件的启用状态。
-     * 禁用后系统不会再把这个 Activity 当作 TECH_DISCOVERED 的目标唤起，
-     * 从根上避免碰校园卡 / 公交卡时被误唤起。
+     *
+     * 本 App 走的是 TECH_DISCOVERED 技术类型分发：NfcA 是几乎所有 Type A 卡的基础
+     * 技术，所以碰校园卡 / 公交卡 / 银行卡也会唤起本 Activity（非本锁会在里面立刻静默
+     * 退出，不显示任何界面）。关掉设置里那个开关就把组件动态禁掉，系统从根上不再分发。
+     *
+     * ⚠️ 禁用状态是**存在系统里的、不会自己消失** —— 关过之后即使换版本也仍是禁用态，
+     * 所以每次启动都按设置项重新同步一次，避免出现「碰锁没反应又找不到地方改回来」。
      */
     private fun syncNfcTagDispatchComponent() {
         val state = if (SettingsManager.nfcLockAsTagEnabled) {
@@ -309,7 +321,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ─── 主界面 ───
+// ─── 主界面：感应场 ───
+//
+// 设计意图：不堆控件，而是把整屏铺成一块浅绿的「感应场」。
+// 同心波纹直接对应 NFC / BLE 开门的物理动作 —— 靠近感应。
+// 波纹随状态呼吸、收缩、荡开，承担一部分原本由文字承担的反馈。
 
 @Composable
 fun UnlockScreen(
@@ -322,251 +338,296 @@ fun UnlockScreen(
     val isProcessing = state == BleUnlockManager.State.SCANNING ||
             state == BleUnlockManager.State.CONNECTING ||
             state == BleUnlockManager.State.UNLOCKING
-
     val isSuccess = state == BleUnlockManager.State.SUCCESS
     val isFailed  = state == BleUnlockManager.State.FAILED
-
-    var pressScale by remember { mutableStateOf(1f) }
-    val buttonScale by animateFloatAsState(
-        targetValue = if (isProcessing) 0.96f else pressScale,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
-    )
 
     var showLogs by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(SeuGreenField)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+        // ── 感应场：精确锚在整屏正中央 ──
+        // 状态文字用固定偏移单独放，不参与居中计算 —— 否则它会把整组内容往上顶，
+        // 场子越大顶得越明显（460dp 的场会被顶掉 25dp 左右）。
+        Box(
+            modifier = Modifier.align(Alignment.Center),
+            contentAlignment = Alignment.Center,
         ) {
-            Spacer(Modifier.height(48.dp))
-
-            // ── 顶部：设备信息 + 设置齿轮 ──
-            TopInfo(onOpenSettings = onOpenSettings)
-
-            Spacer(Modifier.weight(0.6f))
-
-            // ── 中央：开门按钮 ──
-            UnlockButton(
+            SenseField(
                 state = state,
                 isProcessing = isProcessing,
                 isSuccess = isSuccess,
                 isFailed = isFailed,
-                scale = buttonScale,
-                onPressStart = { pressScale = 0.95f },
-                onPressEnd = { pressScale = 1f },
-                onClick = {
-                    if (!isProcessing) {
-                        pressScale = 0.92f
-                        onUnlock()
-                    }
-                },
+                onClick = { if (!isProcessing) onUnlock() },
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(y = 258.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            StatusText(state = state, text = statusText)
+        }
+
+        // ── 顶部：设置入口 + 门锁身份 ──
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onOpenSettings) {
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "设置",
+                        tint = SeuGreenDeep,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+
+            // 门锁身份
+            Text(
+                SettingsManager.bleName(),
+                style = MaterialTheme.typography.titleLarge,
+                color = SeuGreenDeep,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                SettingsManager.deviceMac.ifBlank { "自动扫描" },
+                style = MaterialTheme.typography.labelSmall,
+                color = SeuInkOnField,
+            )
+        }
+
+        // ── 底部：主操作 + 备注意 ──
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+        ) {
+            // 主操作：点击开门（走 BLE）
+            Button(
+                onClick = { if (!isProcessing) onUnlock() },
+                enabled = !isProcessing,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                shape = MaterialTheme.shapes.large,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SeuGreenFill,
+                    contentColor = SeuSurface,
+                    disabledContainerColor = SeuGreenFill.copy(alpha = 0.4f),
+                    disabledContentColor = SeuSurface,
+                ),
+            ) {
+                Text(
+                    when {
+                        isSuccess -> "已开门"
+                        isFailed -> "重试"
+                        isProcessing -> "开门中…"
+                        else -> "点击开门"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // 备注意：另一条不用打开 App 的路。刻意压低存在感 —— 它是说明，不是操作。
+            Text(
+                "贴到门锁感应区，NFC 自动解锁",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 11.sp,
+                color = SeuInkOnField.copy(alpha = 0.6f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
 
-            Spacer(Modifier.height(28.dp))
-
-            // ── 状态文字 ──
-            StatusText(state = state, text = statusText)
-
-            Spacer(Modifier.weight(0.4f))
-
-            // ── 底部：日志 ──
             if (logs.isNotEmpty()) {
+                Spacer(Modifier.height(16.dp))
                 LogSection(logs = logs, expanded = showLogs, onToggle = { showLogs = !showLogs })
             }
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
 
-// ── 顶部信息 ──
+// ── 感应场：同心波纹 + 中心门锁 ──
+
+/** 待机 / 开锁时的呼吸周期（毫秒，一个完整来回） */
+private const val IDLE_BREATH_MS = 4200f
+private const val BUSY_BREATH_MS = 1600f
+
+/** 待机 / 开锁时的收缩周期（毫秒，一圈从最外走到盘边） */
+private const val IDLE_CONTRACT_MS = 7000f
+private const val BUSY_CONTRACT_MS = 1500f
+
+/** 从待机速度过渡到开锁速度（或反向）所用的时间 */
+private const val SPEED_RAMP_MS = 1100
+
+/** 2π —— 余弦折返用的整周期（PI.toFloat() 是函数调用，不能用 const） */
+private val TWO_PI = 2f * PI.toFloat()
 
 @Composable
-private fun TopInfo(onOpenSettings: () -> Unit) {
-    val deviceName = SettingsManager.bleName()
-    val mac = SettingsManager.deviceMac.ifBlank { "自动扫描" }
-
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 占位，保持文字居中
-            Spacer(Modifier.width(48.dp))
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
-                Text(
-                    deviceName,
-                    style = MaterialTheme.typography.headlineLarge,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                    ) {
-                        Text(
-                            mac,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-            // 设置齿轮
-            IconButton(onClick = onOpenSettings) {
-                Icon(
-                    Icons.Default.Settings,
-                    contentDescription = "设置",
-                    tint = WarmGray,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-    }
-}
-
-// ── 开门按钮 ──
-
-@Composable
-private fun UnlockButton(
+private fun SenseField(
     state: BleUnlockManager.State,
     isProcessing: Boolean,
     isSuccess: Boolean,
     isFailed: Boolean,
-    scale: Float,
-    onPressStart: () -> Unit,
-    onPressEnd: () -> Unit,
     onClick: () -> Unit,
 ) {
-    val ringTransition = rememberInfiniteTransition()
-    val ringRotation by ringTransition.animateFloat(
-        initialValue = 0f, targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing)),
-    )
-    val ringSweep by ringTransition.animateFloat(
-        initialValue = 60f, targetValue = 300f,
-        animationSpec = infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-    )
-
-    val buttonColor by animateColorAsState(
+    val accent by animateColorAsState(
         targetValue = when {
-            isSuccess -> Moss
-            isFailed  -> Rust
-            else      -> Walnut
+            isSuccess -> SeuGreenDeep
+            isFailed  -> SeuError
+            else      -> SeuGreenFill
         },
         animationSpec = tween(400),
     )
 
-    val contentColor = PureWhite
-
-    val shakeOffset by animateFloatAsState(
-        targetValue = if (isFailed) 1f else 0f,
-        animationSpec = if (isFailed) repeatable(
-            iterations = 3, animation = tween(80), repeatMode = RepeatMode.Reverse,
-        ) else tween(0),
+    // 速度系数：0 = 待机，1 = 开锁中。它本身用 tween 平滑过渡，
+    // 所以"提速"是一个过程，而不是换挡。
+    // 持 State 对象而不是用 by：下面的帧循环要读 .value，不需要参与重组。
+    val speedState = animateFloatAsState(
+        targetValue = if (isProcessing) 1f else 0f,
+        animationSpec = tween(durationMillis = SPEED_RAMP_MS, easing = FastOutSlowInEasing),
     )
-    val shakePx = with(LocalDensity.current) { (shakeOffset * 8f).dp.toPx() }
+
+    // 相位手动推进。
+    //
+    // 为什么不用 InfiniteTransition：它只能整个替换 animationSpec，换的那一瞬速度
+    // 是硬跳的（7000ms 直接变 1500ms），看着像突然被拽了一下。改成每帧累积相位、
+    // 周期由 speed 连续插值，加速与减速就都成了渐变。
+    //
+    // 写入的是 MutableFloatState，且只在 Canvas 的绘制作用域里读 —— 每帧只重绘。
+    val breathState = remember { mutableFloatStateOf(0f) }
+    val contractState = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(Unit) {
+        var last = withFrameNanos { it }
+        var breathPhase = 0f
+        while (true) {
+            val now = withFrameNanos { it }
+            val dtMs = (now - last) / 1_000_000f
+            last = now
+
+            val s = speedState.value
+            val breathPeriod = IDLE_BREATH_MS + (BUSY_BREATH_MS - IDLE_BREATH_MS) * s
+            val contractPeriod = IDLE_CONTRACT_MS + (BUSY_CONTRACT_MS - IDLE_CONTRACT_MS) * s
+
+            // 呼吸：相位单向走，用余弦折成 0→1→0 的平滑来回。
+            // ⚠️ 必须是 2π 不是 π：breathPhase 扫 0→1，乘 π 只覆盖 [0, π]，
+            //    而 cos 在 [0, π] 上是单调的 → 折出来是 0→1 单向爬升，到点归零就成了锯齿。
+            //    乘 2π 才扫满一整个余弦周期，得到真正的"呼出去再吸回来"。
+            breathPhase = (breathPhase + dtMs / breathPeriod) % 1f
+            breathState.floatValue = (1f - cos(TWO_PI * breathPhase)) / 2f
+
+            // 收缩：相位单向走，跑到头自然回到最外圈
+            contractState.floatValue = (contractState.floatValue + dtMs / contractPeriod) % 1f
+        }
+    }
+
+    // 成功后中心盘轻轻弹一下
+    val discScale by animateFloatAsState(
+        targetValue = if (isSuccess) 1.06f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+    )
+
+    // 按下反馈：只让中心实心盘缩一点，不用系统涟漪。
+    //
+    // 为什么不能用默认涟漪：这块是素 Box，没有 Surface 提供 contentColor，
+    // LocalContentColor 会退回默认的黑色 —— 涟漪就是黑的。场子在 460dp 下
+    // 会铺出一整个黑圆，看着像屏幕上糊了一块。压反馈限制在实心盘内最干净。
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.93f else 1f,
+        animationSpec = tween(140),
+    )
 
     Box(
         modifier = Modifier
-            .graphicsLayer { translationX = if (isFailed) shakePx else 0f }
-            .scale(scale),
+            // 用 requiredSize 而不是 size：size 会被父级约束夹回屏幕宽度内，
+            // 这样写才能真正溢出去，让最外圈的波纹跑出屏幕边缘。
+            .requiredSize(460.dp)
+            .clip(CircleShape)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,          // 不要系统涟漪，见上面 pressScale 的说明
+                enabled = !isProcessing,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        if (isProcessing) {
-            Canvas(modifier = Modifier.size(230.dp)) {
-                val strokeW = 3.dp.toPx()
-                drawArc(
-                    color = Walnut.copy(alpha = 0.25f),
-                    startAngle = ringRotation,
-                    sweepAngle = ringSweep,
-                    useCenter = false,
-                    topLeft = Offset(strokeW / 2, strokeW / 2),
-                    size = Size(size.width - strokeW, size.height - strokeW),
-                    style = Stroke(width = strokeW, cap = StrokeCap.Round),
-                )
-            }
-        }
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            // 在绘制作用域里才读动画值：只重绘，不重组
+            val breath = breathState.value
+            val contract = contractState.value
 
-        if (isSuccess) {
-            Canvas(modifier = Modifier.size(230.dp)) {
+            val base = size.minDimension / 2f - 1.dp.toPx()
+            val discR = base * 0.32f * discScale * pressScale * (1f + 0.05f * breath)
+
+            // ── 光晕：盘外一圈柔光，随呼吸明灭 ──
+            // 16 层递减透明度的同心圆叠加，不用 Modifier.blur —— 后者要 API 31+，
+            // 而且离屏高斯模糊的开销远高于画几个圆。
+            val haloPulse = 0.35f + 0.65f * breath
+            val haloLayers = 16
+            for (i in haloLayers downTo 1) {
+                val t = i / haloLayers.toFloat()          // 1 = 最外圈
                 drawCircle(
-                    color = Moss.copy(alpha = 0.12f),
-                    radius = size.minDimension / 2,
+                    color = accent.copy(alpha = 0.055f * (1f - t) * haloPulse),
+                    radius = discR * (1f + 0.65f * t),
                 )
             }
+            // 贴着盘边的一圈细光环，给光晕一个明确的"边"，否则会糊成一团
+            drawCircle(
+                color = accent.copy(alpha = 0.18f + 0.22f * haloPulse),
+                radius = discR * (1.14f + 0.05f * breath),
+                style = Stroke(width = 1.5.dp.toPx()),
+            )
+
+            // ── 三圈波纹：只往里收，不来回荡 ──
+            // 每一圈都在 [最外圈 → 盘边] 之间单向推进。透明度走正弦钟形曲线：
+            // 起点 0 → 中段最亮 → 终点 0，所以新线是在最外圈慢慢浮现、再慢慢隐去，
+            // 而不是在边缘"啪"地凭空出现。
+            val ringCount = 3
+            val ringOuter = base
+            val ringInner = base * 0.44f
+            repeat(ringCount) { i ->
+                val phase = (contract + i / ringCount.toFloat()) % 1f
+                val fade = sin(PI.toFloat() * phase)
+                drawCircle(
+                    color = accent.copy(alpha = 0.5f * fade),
+                    radius = ringInner + (ringOuter - ringInner) * (1f - phase),
+                    style = Stroke(width = 1.dp.toPx()),
+                )
+            }
+
+            // 中心实心盘
+            drawCircle(color = accent, radius = discR)
         }
 
-        Surface(
-            onClick = onClick,
-            modifier = Modifier.size(170.dp),
-            shape = CircleShape,
-            color = buttonColor,
-            contentColor = contentColor,
-            shadowElevation = 4.dp,
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                AnimatedContent(
-                    targetState = state,
-                    transitionSpec = {
-                        fadeIn(tween(200)) togetherWith fadeOut(tween(150))
-                    },
-                ) { s ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    when (s) {
-                        BleUnlockManager.State.SUCCESS -> {
-                            Icon(Icons.Default.LockOpen, null, modifier = Modifier.size(44.dp))
-                            Spacer(Modifier.height(6.dp))
-                            Text("已开", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        }
-                        BleUnlockManager.State.FAILED -> {
-                            Icon(Icons.Default.Refresh, null, modifier = Modifier.size(44.dp))
-                            Spacer(Modifier.height(6.dp))
-                            Text("重试", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        }
-                        BleUnlockManager.State.SCANNING,
-                        BleUnlockManager.State.CONNECTING,
-                        BleUnlockManager.State.UNLOCKING -> {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(40.dp),
-                                color = contentColor,
-                                strokeWidth = 3.dp,
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                when (s) {
-                                    BleUnlockManager.State.SCANNING -> "扫描中"
-                                    BleUnlockManager.State.CONNECTING -> "连接中"
-                                    else -> "开门中"
-                                },
-                                fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                            )
-                        }
-                        else -> {
-                            Icon(Icons.Default.Lock, null, modifier = Modifier.size(44.dp))
-                            Spacer(Modifier.height(6.dp))
-                            Text("开门", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-            }
-        }
+        Icon(
+            imageVector = when (state) {
+                BleUnlockManager.State.SUCCESS -> Icons.Default.LockOpen
+                BleUnlockManager.State.FAILED  -> Icons.Default.Refresh
+                else -> Icons.Default.Lock
+            },
+            contentDescription = null,
+            tint = SeuSurface,
+            modifier = Modifier.size(46.dp),
+        )
     }
 }
 
@@ -575,12 +636,12 @@ private fun UnlockButton(
 @Composable
 private fun StatusText(state: BleUnlockManager.State, text: String) {
     val color = when (state) {
-        BleUnlockManager.State.SUCCESS -> Moss
-        BleUnlockManager.State.FAILED  -> Rust
+        BleUnlockManager.State.SUCCESS -> SeuGreenDeep
+        BleUnlockManager.State.FAILED  -> SeuError
         BleUnlockManager.State.UNLOCKING,
         BleUnlockManager.State.SCANNING,
-        BleUnlockManager.State.CONNECTING -> Walnut
-        else -> WarmGray
+        BleUnlockManager.State.CONNECTING -> SeuGreen
+        else -> SeuInkOnField
     }
 
     AnimatedContent(
@@ -590,7 +651,7 @@ private fun StatusText(state: BleUnlockManager.State, text: String) {
         androidx.compose.foundation.text.selection.SelectionContainer {
             Text(
                 t,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 color = color,
             fontWeight = if (state != BleUnlockManager.State.IDLE) FontWeight.Medium else FontWeight.Normal,
             textAlign = TextAlign.Center,
@@ -605,11 +666,12 @@ private fun StatusText(state: BleUnlockManager.State, text: String) {
 private fun LogSection(logs: List<String>, expanded: Boolean, onToggle: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
+        shape = MaterialTheme.shapes.medium,
+        // 半透明白：浅绿场上不抢戏，又能把日志和波纹分层
+        color = SeuSurface.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, SeuGreen.copy(alpha = 0.16f)),
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -619,26 +681,26 @@ private fun LogSection(logs: List<String>, expanded: Boolean, onToggle: () -> Un
             ) {
                 Text(
                     "运行日志",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SeuInkOnField,
                 )
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowUp
                     else Icons.Default.KeyboardArrowDown,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = SeuInkOnField,
                     modifier = Modifier.size(20.dp),
                 )
             }
 
             AnimatedVisibility(visible = expanded) {
                 androidx.compose.foundation.text.selection.SelectionContainer {
-                    Column(modifier = Modifier.padding(top = 12.dp)) {
+                    Column(modifier = Modifier.padding(top = 10.dp)) {
                         logs.takeLast(15).forEach { msg ->
                             Text(
                                 msg,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                color = SeuInkOnField,
                                 lineHeight = 18.sp,
                                 modifier = Modifier.padding(vertical = 1.dp),
                             )
@@ -676,17 +738,17 @@ private fun DisclaimerDialog(onAgree: () -> Unit, onDisagree: () -> Unit) {
             )
         },
         confirmButton = {
-            Button(onClick = onAgree, colors = ButtonDefaults.buttonColors(containerColor = Walnut)) {
+            Button(onClick = onAgree, colors = ButtonDefaults.buttonColors(containerColor = SeuGreen)) {
                 Text("同意")
             }
         },
         dismissButton = {
             TextButton(onClick = onDisagree) {
-                Text("不同意", color = Rust)
+                Text("不同意", color = SeuError)
             }
         },
         containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.large,
     )
 }
 
@@ -709,7 +771,7 @@ private fun NfcWriteTagDialog(onCancel: () -> Unit) {
                     Icons.Default.Nfc,
                     contentDescription = null,
                     modifier = Modifier.size(52.dp),
-                    tint = Walnut,
+                    tint = SeuGreen,
                 )
                 Spacer(Modifier.height(14.dp))
                 Text(
@@ -725,10 +787,10 @@ private fun NfcWriteTagDialog(onCancel: () -> Unit) {
         confirmButton = {},
         dismissButton = {
             TextButton(onClick = onCancel) {
-                Text("取消", color = Rust)
+                Text("取消", color = SeuError)
             }
         },
         containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.large,
     )
 }

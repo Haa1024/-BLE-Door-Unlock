@@ -1,11 +1,13 @@
 package com.unlock.door
 
-import android.nfc.NfcAdapter
 import android.content.ComponentName
 import android.content.pm.PackageManager
+import android.nfc.NfcAdapter
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,10 +16,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -46,6 +51,7 @@ fun SettingsScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
 
     // 拦截系统返回键 / 侧滑 → 回到主界面
     BackHandler { onBack() }
@@ -93,10 +99,11 @@ fun SettingsScreen(
             var loginLoading by remember { mutableStateOf(false) }
 
             Card(
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    containerColor = MaterialTheme.colorScheme.surface
                 ),
+                border = BorderStroke(1.dp, SeuLine),
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
@@ -115,10 +122,10 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("手机号", fontSize = 13.sp) },
                         singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = MaterialTheme.shapes.small,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Walnut, cursorColor = Walnut,
+                            focusedBorderColor = SeuGreen, cursorColor = SeuGreen,
                         ),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -132,10 +139,10 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("密码", fontSize = 13.sp) },
                         singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = MaterialTheme.shapes.small,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Walnut, cursorColor = Walnut,
+                            focusedBorderColor = SeuGreen, cursorColor = SeuGreen,
                         ),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -175,16 +182,16 @@ fun SettingsScreen(
                                 }
                             },
                             enabled = loginPhone.isNotBlank() && loginPassword.isNotBlank() && !loginLoading,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = MaterialTheme.shapes.small,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Moss,
-                                disabledContainerColor = Moss.copy(alpha = 0.4f),
+                                containerColor = SeuGreenDeep,
+                                disabledContainerColor = SeuGreenDeep.copy(alpha = 0.4f),
                             ),
                         ) {
                             if (loginLoading) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
-                                    color = PureWhite, strokeWidth = 2.dp,
+                                    color = SeuSurface, strokeWidth = 2.dp,
                                 )
                                 Spacer(Modifier.width(6.dp))
                             }
@@ -198,10 +205,71 @@ fun SettingsScreen(
                             Text(
                                 loginStatus,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (loginStatus.startsWith("已登录")) Moss else Rust,
+                                color = if (loginStatus.startsWith("已登录")) SeuGreenDeep else SeuError,
                                 lineHeight = 16.sp,
                             )
                         }
+                    }
+
+                    // ── 支付宝一键登录（本变体占用了官方包名，直接复用官方 App 的支付宝授权） ──
+                    Spacer(Modifier.height(10.dp))
+                    var alipayLoading by remember { mutableStateOf(false) }
+                    var alipayStatus by remember { mutableStateOf("") }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (alipayLoading) return@OutlinedButton
+                            val act = ctx as? android.app.Activity
+                            if (act == null) {
+                                alipayStatus = "无法获取当前界面"
+                                return@OutlinedButton
+                            }
+                            alipayLoading = true
+                            alipayStatus = ""
+                            scope.launch {
+                                try {
+                                    val authInfo = ServerApi.fetchAlipayAuthInfo()
+                                    val code = AlipayLogin.auth(act, authInfo)
+                                    val result = ServerApi.loginByAlipayAuthCode(code)
+                                    if (result.success) {
+                                        loginPhone = SettingsManager.loginPhone
+                                        loginStatus = if (SettingsManager.showLogs)
+                                            "已登录\n${result.projectName}" else "登录成功"
+                                    } else {
+                                        alipayStatus = result.error
+                                    }
+                                } catch (e: Exception) {
+                                    alipayStatus = e.message ?: e.javaClass.simpleName
+                                }
+                                alipayLoading = false
+                            }
+                        },
+                        enabled = !alipayLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.small,
+                        border = BorderStroke(1.dp, SeuGreen),
+                    ) {
+                        if (alipayLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = SeuGreen, strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(
+                            if (alipayLoading) "唤起支付宝中…" else "支付宝一键登录",
+                            fontSize = 14.sp,
+                            color = SeuGreenDeep,
+                        )
+                    }
+                    if (alipayStatus.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            alipayStatus,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SeuError,
+                            lineHeight = 16.sp,
+                        )
                     }
 
                     // 登录成功后显示自动获取按钮
@@ -246,13 +314,13 @@ fun SettingsScreen(
                             },
                             enabled = !fetching,
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Walnut),
+                            shape = MaterialTheme.shapes.small,
+                            colors = ButtonDefaults.buttonColors(containerColor = SeuGreen),
                         ) {
                             if (fetching) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
-                                    color = PureWhite, strokeWidth = 2.dp,
+                                    color = SeuSurface, strokeWidth = 2.dp,
                                 )
                                 Spacer(Modifier.width(6.dp))
                             }
@@ -267,7 +335,7 @@ fun SettingsScreen(
                                 Text(
                                     fetchResult,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (fetchResult.startsWith("已获取")) Moss else Rust,
+                                    color = if (fetchResult.startsWith("已获取")) SeuGreenDeep else SeuError,
                                     lineHeight = 16.sp,
                                 )
                             }
@@ -340,10 +408,10 @@ fun SettingsScreen(
                         fontSize = 12.sp)
                 },
                 singleLine = false,
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.small,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Walnut,
-                    cursorColor = Walnut,
+                    focusedBorderColor = SeuGreen,
+                    cursorColor = SeuGreen,
                 ),
             )
 
@@ -352,10 +420,11 @@ fun SettingsScreen(
             // ── 日志开关 ──
             var showLogs by remember { mutableStateOf(SettingsManager.showLogs) }
             Card(
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    containerColor = MaterialTheme.colorScheme.surface
                 ),
+                border = BorderStroke(1.dp, SeuLine),
             ) {
                 Row(
                     modifier = Modifier
@@ -383,8 +452,8 @@ fun SettingsScreen(
                             SettingsManager.showLogs = it
                         },
                         colors = SwitchDefaults.colors(
-                            checkedThumbColor = PureWhite,
-                            checkedTrackColor = Walnut,
+                            checkedThumbColor = SeuSurface,
+                            checkedTrackColor = SeuGreen,
                         ),
                     )
                 }
@@ -398,10 +467,11 @@ fun SettingsScreen(
             var showHceLog by remember { mutableStateOf(false) }
 
             Card(
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    containerColor = MaterialTheme.colorScheme.surface
                 ),
+                border = BorderStroke(1.dp, SeuLine),
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
@@ -413,62 +483,81 @@ fun SettingsScreen(
 
                     // ① 磁标签开门 (即写即用)
                     Text(
-                        "① 磁标签开门 — 把写好指令的 NFC 标签贴在门边，手机碰一下自动开门",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                        lineHeight = 16.sp,
+                        "① 磁标签开门",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "把写好指令的 NFC 标签贴在门边，手机碰一下自动开门。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SeuInkSoft,
+                        lineHeight = 18.sp,
+                    )
+                    Spacer(Modifier.height(10.dp))
                     Button(
                         onClick = onWriteNfcTag,
                         enabled = nfcAdapter != null,
-                        shape = RoundedCornerShape(10.dp),
+                        shape = MaterialTheme.shapes.small,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Walnut,
-                            disabledContainerColor = Walnut.copy(alpha = 0.4f),
+                            containerColor = SeuGreenFill,
+                            disabledContainerColor = SeuGreenFill.copy(alpha = 0.4f),
                         ),
                     ) {
                         Text("写入 NFC 标签", fontSize = 14.sp)
                     }
 
-                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(18.dp))
 
-                    // ② 手机碰锁感应区开门 (官方 0xB1 协议已破解并移植)
+                    // ② 手机碰锁感应区开门 (官方 0xB1 协议已破解并移植) —— App 前台时走读卡器模式
                     Text(
-                        "② 手机碰锁感应区开门 — App 前台时手机直接碰门锁感应区即可开门（官方 0xB1 协议已完整移植，需已填入凭证）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                        lineHeight = 16.sp,
+                        "② 手机碰锁感应区开门",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        "流程: 读锁标签NDEF取设备ID (无NDEF则用已配置设备ID) → 写入 0xB1[RC4(projectId+chainKey)] → 锁返回新密钥(轮换)",
+                        "App 打开时，手机直接碰门锁感应区即可开门。",
                         style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        lineHeight = 16.sp,
+                        color = SeuInkSoft,
+                        lineHeight = 18.sp,
                     )
-                    TextButton(onClick = { showHceLog = true }) {
-                        Text("查看 NFC 通讯日志", fontSize = 13.sp, color = Walnut)
+                    PrincipleNote(
+                        title = "协议流程",
+                        body = "读锁标签 NDEF 取设备 ID（无 NDEF 则用已配置设备 ID）\n" +
+                            "→ 写入 0xB1[RC4(projectId + chainKey)]\n" +
+                            "→ 锁返回新密钥（自动轮换）",
+                    )
+                    TextButton(
+                        onClick = { showHceLog = true },
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+                    ) {
+                        Text("查看 NFC 通讯日志", fontSize = 13.sp, color = SeuGreen)
                     }
 
-                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(18.dp))
 
                     // ③ 碰门锁本体直接开门 (TECH_DISCOVERED 后台分发, 先用 UID 判定是否本门锁)
                     var lockAsTag by remember { mutableStateOf(SettingsManager.nfcLockAsTagEnabled) }
                     Text(
-                        "③ 碰门锁本体直接开门 — 不必打开 App，锁屏也能碰锁开门（实验性）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                        lineHeight = 16.sp,
+                        "③ 碰门锁本体直接开门",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        "原理: 门锁感应区无 NDEF，只能按技术类型(NfcA)被系统分发，再由 UID 反推 deviceId 判定是否本锁。\n" +
-                            "注意: 任何 NfcA 卡(校园卡/公交卡/银行卡)被碰都会唤起本 App，非门锁标签会立即静默退出，不显示界面。",
+                        "不必打开 App：解锁屏幕后碰一下门锁感应区就能开门。",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        lineHeight = 16.sp,
+                        color = SeuInkSoft,
+                        lineHeight = 18.sp,
+                    )
+                    PrincipleNote(
+                        body = "门锁感应区没有可供匹配的 NDEF 内容，系统只能按「技术类型」分发 —— " +
+                            "而 NfcA 几乎是所有 Type A 卡的基础技术，校园卡 / 公交卡 / 银行卡都会一起命中。\n" +
+                            "本 App 收到分发后再自己筛一道：UID 必须以 ASCII「XN-」开头，" +
+                            "由它反推的 deviceId 必须与上面配置的一致。任一条不满足就立刻静默退出，" +
+                            "连闪一下都没有 —— 不会去动别人的锁。\n" +
+                            "关掉下面这个开关，系统就完全不再分发（比静默退出更彻底）。",
                     )
                     Spacer(Modifier.height(8.dp))
                     Row(
@@ -496,8 +585,8 @@ fun SettingsScreen(
                                 }
                             },
                             colors = SwitchDefaults.colors(
-                                checkedThumbColor = PureWhite,
-                                checkedTrackColor = Walnut,
+                                checkedThumbColor = SeuSurface,
+                                checkedTrackColor = SeuGreen,
                             ),
                         )
                     }
@@ -506,14 +595,14 @@ fun SettingsScreen(
                         Text(
                             "本机不支持 NFC，NFC 相关功能不可用，BLE 开门不受影响",
                             style = MaterialTheme.typography.labelSmall,
-                            color = Rust,
+                            color = SeuError,
                             lineHeight = 16.sp,
                         )
                     } else if (!nfcAdapter.isEnabled) {
                         Text(
                             "NFC 已关闭，请到系统设置开启",
                             style = MaterialTheme.typography.labelSmall,
-                            color = Rust,
+                            color = SeuError,
                         )
                     }
                 }
@@ -574,7 +663,7 @@ fun SettingsScreen(
                         TextButton(onClick = { NfcDoorLockManager.clearLog() }) { Text("清空") }
                     },
                     containerColor = MaterialTheme.colorScheme.surface,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = MaterialTheme.shapes.large,
                 )
             }
 
@@ -593,9 +682,9 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Walnut,
+                    containerColor = SeuGreen,
                 ),
             ) {
                 Icon(Icons.Default.Check, null, modifier = Modifier.size(20.dp))
@@ -636,12 +725,62 @@ private fun ParamField(
             modifier = Modifier.fillMaxWidth(),
             placeholder = { Text(hint, fontSize = 13.sp) },
             singleLine = true,
-            shape = RoundedCornerShape(12.dp),
+            shape = MaterialTheme.shapes.small,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Walnut,
-                cursorColor = Walnut,
+                focusedBorderColor = SeuGreen,
+                cursorColor = SeuGreen,
             ),
         )
+    }
+}
+
+// ── 可折叠的「原理」说明 ──
+
+/**
+ * 设置页不该是说明书。
+ *
+ * 长段解释默认收起 —— 折叠态只占一行，把版面还给真正要动手填的输入项；
+ * 想知道原理的人点一下展开，看完再收起来。
+ */
+@Composable
+private fun PrincipleNote(
+    body: String,
+    title: String = "原理与注意事项",
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .clickable { expanded = !expanded }
+                .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium,
+                color = SeuGreenDeep,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "收起" else "展开",
+                tint = SeuGreenDeep,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+
+        AnimatedVisibility(visible = expanded) {
+            Text(
+                body,
+                modifier = Modifier.padding(top = 2.dp, bottom = 6.dp, end = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = SeuInkSoft,
+                lineHeight = 19.sp,
+            )
+        }
     }
 }

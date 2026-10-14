@@ -92,10 +92,11 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
                 STATE_FAILED    -> "失败, 重试"
                 else            -> "点击开门"
             }
+            // 与 Compose 主题同一套东大绿配色（成功的绿比主色深一档，白底上更耐看）
             val statusColor = when (state) {
-                STATE_SUCCESS   -> "#4A7C59"
-                STATE_FAILED    -> "#C44B4B"
-                else            -> "#1A1814"
+                STATE_SUCCESS   -> "#47701F"
+                STATE_FAILED    -> "#C0392B"
+                else            -> "#231815"
             }
 
             // 根据尺寸层级控制文字可见性

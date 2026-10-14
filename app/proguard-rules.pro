@@ -24,6 +24,14 @@
 -dontwarn okhttp3.**
 -dontwarn okio.**
 
+# ─── 支付宝 SDK ───
+# AAR 自带 consumerProguardFiles（AGP 会自动合并），AuthTask / IAlixPay 等 keep
+# 已由它提供，这里只补 R8 容易抱怨的可选依赖缺失告警。
+-keep class com.alipay.sdk.app.** { *; }
+-dontwarn com.alipay.**
+-dontwarn com.ta.utdid2.**
+-dontwarn com.ut.device.**
+
 # ─── 序列化相关 ───
 -keepattributes Signature
 -keepattributes *Annotation*
